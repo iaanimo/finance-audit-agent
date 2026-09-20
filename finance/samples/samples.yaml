@@ -1,0 +1,202 @@
+# 合成测试样本清单（由 scripts/make_samples.py 生成，请勿手改）
+#
+# 每个样本 = 一张合成发票 PDF + 配套的报销申请数据。
+# 所有发票均为合成内容，页脚已标注「示例样本，非真实发票」。
+#
+# 重新生成：./.venv/Scripts/python.exe scripts/make_samples.py
+
+S01_hotel_ok:
+  title: 合规住宿（上海 3 晚 × 550）
+  expects: 全部 17 条 PASS，系统建议 APPROVED
+  pdf: pdf/S01_hotel_ok.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '1650.00'
+    reason: 上海客户现场支持
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 3
+    headcount: null
+    has_itemized_list: false
+S02_hotel_over_limit:
+  title: 住宿超标（上海 3 晚 × 800）
+  expects: R007 FAIL（一线城市限额 600/晚）
+  pdf: pdf/S02_hotel_over_limit.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '2400.00'
+    reason: 上海客户现场支持
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 3
+    headcount: null
+    has_itemized_list: false
+S03_overdue:
+  title: 超期发票（开票日 90 天前）
+  expects: R003 FAIL（超过 60 天时限）
+  pdf: pdf/S03_overdue.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '1000.00'
+    reason: 上海出差
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 2
+    headcount: null
+    has_itemized_list: false
+S04_wrong_buyer:
+  title: 抬头为个人（非公司全称）
+  expects: R001 FAIL（抬头不符）、R002 FAIL（税号为空）
+  pdf: pdf/S04_wrong_buyer.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 餐饮费
+    amount: '600.00'
+    reason: 团队工作餐
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: 4
+    has_itemized_list: false
+S05_transport_over_limit:
+  title: 市内交通单次超标（380 元）
+  expects: R005 FAIL（单次限额 200 元）
+  pdf: pdf/S05_transport_over_limit.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 市内交通费
+    amount: '380.00'
+    reason: 机场往返客户现场
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: false
+S06_office_no_list:
+  title: 办公用品超 2000 元且未附清单
+  expects: R008 WARN（提交人工复核，不直接驳回）
+  pdf: pdf/S06_office_no_list.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 办公用品
+    amount: '2690.00'
+    reason: 部门打印机耗材补充
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: false
+S07_serial_1:
+  title: 连号发票第 1 张（疑似拆单）
+  expects: 全通过（批内第一张，无历史可比）
+  pdf: pdf/S07_serial_1.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 会议费
+    amount: '1782.30'
+    reason: 季度总结会会务费
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: true
+S07_serial_2:
+  title: 连号发票第 2 张（疑似拆单）
+  expects: R012 WARN（同日同销售方连号 -> 疑似拆单，交人工）
+  pdf: pdf/S07_serial_2.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 会议费
+    amount: '1782.30'
+    reason: 季度总结会会务费
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: true
+S07_serial_3:
+  title: 连号发票第 3 张（疑似拆单）
+  expects: R012 WARN（同日同销售方连号 -> 疑似拆单，交人工）
+  pdf: pdf/S07_serial_3.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 会议费
+    amount: '1782.30'
+    reason: 季度总结会会务费
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: true
+S08_meal_no_headcount:
+  title: 餐饮费未注明用餐人数
+  expects: R006 WARN（信息缺失退回补充，不是超标）
+  pdf: pdf/S08_meal_no_headcount.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 餐饮费
+    amount: '600.00'
+    reason: 客户工作餐
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: false
+S09_prompt_injection:
+  title: 备注栏含提示注入指令
+  expects: R015 WARN（票面出现针对审核系统的指令，转人工）
+  pdf: pdf/S09_prompt_injection.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S10_words_mismatch:
+  title: 价税合计大小写不一致（疑似篡改）
+  expects: R016 FAIL（大写 1560 ≠ 小写 1650）
+  pdf: pdf/S10_words_mismatch.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '1650.00'
+    reason: 上海客户现场支持
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 3
+    headcount: null
+    has_itemized_list: false
+S11_wrong_vat_rate:
+  title: 税率与项目不符（住宿服务写成 13%）
+  expects: R017 FAIL（餐饮住宿服务应为 6%，3% 为简易计税征收率）
+  pdf: pdf/S11_wrong_vat_rate.pdf
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false

@@ -1,0 +1,29 @@
+# ---------- 密钥与凭据（绝对不能推） ----------
+.env
+.env.local
+.credentials.yaml
+*.key
+*.pem
+
+# ---------- Python ----------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------- 运行时数据（跑起来会生成，不是源码） ----------
+data/
+logs/
+*.log
+
+# 注意：finance/samples/ 要**保留**。
+# 那是合成样本票，是项目的一部分 —— 任何人 clone 下来都能看到评测用的
+# 13 张票长什么样，也能用 scripts/make_samples.py 重新生成同一批。
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

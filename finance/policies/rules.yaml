@@ -1,0 +1,212 @@
+# 报销审核规则表 —— 机器可读版本
+#
+# 这份文件是「制度」与「代码」之间的桥。每一条规则必须满足三方可追溯：
+#   rule_id  <->  reimbursement.md 的 clause（条款号）  <->  rules.py 里的 checker 函数
+# 三者缺一，tests/test_finance.py 的 test_rules_policy_code_consistency 会失败。
+#
+# severity_on_fail 的取值必须与 reimbursement.md 原文措辞对齐：
+#   原文说「不得报销」「不予受理」 -> FAIL（事实性违规，系统直接驳回）
+#   原文说「提交人工复核」「退回补充」-> WARN（概率性怀疑，系统只提示，不替人定罪）
+
+company:
+  name: 示例科技有限公司
+  tax_id: 91310000MA1FL2XXXX
+
+# 费用标准参数（从制度第四章抽取，改这里即改规则阈值）
+limits:
+  city_tier1: [北京, 上海, 广州, 深圳]
+  hotel_tier1_per_night: 600
+  hotel_other_per_night: 400
+  local_transport_per_trip: 200
+  meal_per_person: 150
+  office_supplies_per_invoice: 2000
+  invoice_max_age_days: 60
+
+# 增值税适用税率表（依据现行增值税税率表，制度 3.6）
+#
+# ⚠️ 关键设计：放行集合 = {法定税率} ∪ {简易计税征收率 3%}
+#
+# 本表列的是**一般纳税人**税率。但发票票面**看不出销售方是一般纳税人还是
+# 小规模纳税人** —— 小规模纳税人适用简易计税，票面税率就是 3%。
+# 如果硬卡法定税率，每一张小规模纳税人的票都会被误判为"税率错误"。
+#
+# 所以 3% 一律放行，由人工按销售方资质复核。宁可漏报也不误杀 ——
+# 在"审核意见"这种场景下，一次误杀会让整条链路的可信度崩掉。
+vat_rates:
+  simplified_levy_rate: 3
+  categories:
+    - name: 交通运输服务
+      keywords: [运输服务, 客运服务, 货运, 陆路运输, 水路运输, 航空运输, 管道运输, 铁路]
+      rates: [9]
+    - name: 餐饮住宿服务
+      keywords: [餐饮服务, 住宿服务, 餐费, 住宿费, 房费, 客房, 餐饮]
+      rates: [6]
+    - name: 会议展览服务
+      keywords: [会议服务, 会务, 展览服务]
+      rates: [6]
+    - name: 基础电信服务
+      keywords: [基础电信]
+      rates: [9]
+    - name: 增值电信服务
+      keywords: [增值电信, 通讯费, 话费, 宽带]
+      rates: [6]
+    - name: 有形动产租赁
+      keywords: [有形动产租赁, 设备租赁, 车辆租赁]
+      rates: [13]
+    - name: 不动产租赁
+      keywords: [不动产租赁, 房屋租赁, 场地租赁]
+      rates: [9]
+    - name: 建筑服务
+      keywords: [工程服务, 安装服务, 修缮, 装饰服务, 建筑服务]
+      rates: [9]
+    - name: 金融服务
+      keywords: [贷款服务, 保险服务, 金融商品, 手续费]
+      rates: [6]
+    - name: 无形资产
+      keywords: [技术转让, 商标, 著作权, 商誉, 无形资产]
+      rates: [6]
+    - name: 销售不动产
+      keywords: [不动产, 建筑物, 构筑物]
+      rates: [9]
+    - name: 货物（低税率）
+      keywords: [农产品, 食用植物油, 食用盐, 自来水, 暖气, 冷气, 热水, 煤气,
+                 石油液化气, 天然气, 二甲醚, 沼气, 煤炭, 图书, 报纸, 杂志,
+                 音像制品, 电子出版物, 饲料, 化肥, 农药, 农机, 农膜]
+      rates: [9]
+    - name: 货物
+      keywords: [办公用品, 文具, 耗材, 打印, 纸张, 电子设备, 电脑, 货物, 材料]
+      rates: [13]
+
+# 可接受的发票类型（制度 3.4）
+#
+# 注意最后两条：数电票的**票面标题**就是「电子发票（普通发票）」「电子发票（专用发票）」，
+# 与制度条文里的学名"全面数字化的电子发票"字面并不一致。这里两种写法都列上，
+# 否则一张完全合规的数电票会被 R009 误判为 FAIL。
+# 这类"制度用语 vs 票面用语"的落差，正是规则表要显式承载的东西。
+accepted_invoice_types:
+  - 增值税电子普通发票
+  - 增值税电子专用发票
+  - 全面数字化的电子发票
+  - 电子发票（普通发票）
+  - 电子发票（专用发票）
+  - 数电票
+
+rules:
+  - rule_id: R001
+    clause: "3.1"
+    title: 发票抬头必须为公司全称
+    clause_text: "发票「购买方名称」必须为 示例科技有限公司 全称。抬头为个人、其他单位或税号不符的发票，不得报销。"
+    severity_on_fail: FAIL
+    checker: check_buyer_name
+
+  - rule_id: R002
+    clause: "3.1"
+    title: 纳税人识别号必须匹配
+    clause_text: "「纳税人识别号」必须为 91310000MA1FL2XXXX。抬头为个人、其他单位或税号不符的发票，不得报销。"
+    severity_on_fail: FAIL
+    checker: check_buyer_tax_id
+
+  - rule_id: R003
+    clause: "3.2"
+    title: 报销时限不超过 60 天且不得跨年
+    clause_text: "发票开票日期距报销申请提交日期不得超过 60 个自然日。跨年度发票原则上不予受理。"
+    severity_on_fail: FAIL
+    checker: check_invoice_age
+
+  - rule_id: R004
+    clause: "3.3"
+    title: 发票代码+号码不得重复报销
+    clause_text: "同一「发票代码 + 发票号码」不得重复报销。系统应建立台账并对历史记录查重。"
+    severity_on_fail: FAIL
+    checker: check_duplicate
+
+  - rule_id: R005
+    clause: "4.1"
+    title: 市内交通费单次不超过 200 元
+    clause_text: "市内公务交通单次金额不超过 200 元。单次超过 200 元的，不得报销。"
+    severity_on_fail: FAIL
+    checker: check_local_transport_limit
+
+  - rule_id: R006
+    clause: "4.3"
+    title: 餐饮费人均不超过 150 元且须注明事由
+    clause_text: "业务招待及工作餐人均不超过 150 元。报销时必须注明用餐事由及人数。"
+    severity_on_fail: FAIL
+    checker: check_meal_limit
+
+  - rule_id: R007
+    clause: "4.2"
+    title: 住宿费不超过城市分级限额
+    clause_text: "一线城市（北京、上海、广州、深圳）每晚不超过 600 元，其他城市每晚不超过 400 元。超出限额部分由个人承担。"
+    severity_on_fail: FAIL
+    checker: check_hotel_limit
+
+  - rule_id: R008
+    clause: "4.4"
+    title: 办公用品超过 2000 元须附采购清单
+    clause_text: "办公用品单张发票金额不超过 2000 元。超过 2000 元的，须附采购清单。未附清单的，提交人工复核。"
+    severity_on_fail: WARN
+    checker: check_office_supplies
+
+  - rule_id: R009
+    clause: "3.4"
+    title: 发票类型须在可接受范围内
+    clause_text: "可接受：增值税电子普通发票、增值税电子专用发票、全面数字化的电子发票（数电票）。不接受手写收据、定额发票、未加盖发票专用章的纸质发票。"
+    severity_on_fail: FAIL
+    checker: check_invoice_type
+
+  - rule_id: R010
+    clause: "3.5"
+    title: 申请金额必须等于发票价税合计
+    clause_text: "报销申请单所填金额必须与发票「价税合计（小写）」完全一致。不一致的，不得报销，退回更正。"
+    severity_on_fail: FAIL
+    checker: check_amount_match
+
+  - rule_id: R011
+    clause: "5.1"
+    title: 费用类型须能映射到会计科目
+    clause_text: "费用类型须能对应到本公司会计科目表。系统无法自动归类的，提交人工判定。"
+    severity_on_fail: WARN
+    checker: check_account_mapping
+
+  - rule_id: R012
+    clause: "5.2"
+    title: 同日同销售方连号发票视为疑似拆单
+    clause_text: "同一日、同一销售方开具的多张连号发票，应视为疑似拆单，提交人工复核。本情形不直接判定为违规。"
+    severity_on_fail: WARN
+    checker: check_serial_invoices
+
+  - rule_id: R013
+    clause: "6.1"
+    title: 记账凭证借贷必须平衡
+    clause_text: "报销审批通过后，由系统生成记账凭证草稿，借贷方金额必须平衡。凭证须经人工确认后方可入账。"
+    severity_on_fail: FAIL
+    checker: check_voucher_balance
+
+  - rule_id: R014
+    clause: "5.3"
+    title: 申请金额不得超过部门预算余额
+    clause_text: "各部门费用受年度预算约束。申请金额超出所属部门预算余额的，不得报销，须另行申请预算调整。"
+    severity_on_fail: FAIL
+    checker: check_budget_balance
+
+  - rule_id: R015
+    clause: "3.8"
+    title: 票面不得包含针对审核系统的指令
+    clause_text: "发票各栏位（含备注栏、项目名称栏）应仅包含交易相关信息，不得包含针对审核系统的指令性文字。发现此类内容的，提交人工复核。"
+    severity_on_fail: WARN
+    checker: check_prompt_injection
+
+  - rule_id: R016
+    clause: "3.7"
+    title: 价税合计大小写必须一致
+    clause_text: "发票「价税合计（大写）」与「价税合计（小写）」必须一致。大小写不一致的，不得报销。大小写不符是票面被篡改的典型特征。"
+    severity_on_fail: FAIL
+    checker: check_amount_in_words
+
+  - rule_id: R017
+    clause: "3.6"
+    title: 适用税率应与票面项目相符
+    clause_text: "发票所载税率应与票面项目适用的增值税税率相符。适用税率与票面项目不符的，不得报销。例外：销售方为小规模纳税人、适用简易计税的，票面税率为征收率 3%，属正常情形。"
+    severity_on_fail: FAIL
+    checker: check_vat_rate

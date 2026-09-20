@@ -1,0 +1,32 @@
+# 部门年度预算表（制度 5.3）
+#
+# 用途：审核时校验「本次申请金额 <= 部门预算余额」，超出则 R014 FAIL。
+#
+# 注意：这里的余额是**静态快照**，演示用。
+# 真实系统里余额应由已审批通过的报销单累加得出——那需要把 store 的
+# 历史记录接进来（见 finance/store.py 的 AuditStore.sum_approved）。
+# 当前为静态快照，未与已审批单据联动。
+# 真实系统中余额应由已批准单据的金额累加得出（见 store.AuditStore）。
+
+fiscal_year: 2026
+
+departments:
+  - name: 财务部
+    annual_budget: 80000.00
+    used: 12000.00
+    currency: CNY
+
+  - name: 人事部
+    annual_budget: 60000.00
+    used: 8000.00
+    currency: CNY
+
+  - name: 技术部
+    annual_budget: 120000.00
+    used: 45000.00
+    currency: CNY
+
+  - name: 销售部
+    annual_budget: 200000.00
+    used: 150000.00   # 刻意留少：便于演示 R014 预算不足
+    currency: CNY

@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>财务报销审核台 · 受控 Agent</title>
+<style>
+  :root {
+    --ink: #1a1d23; --muted: #6b7280; --line: #e3e6ec; --bg: #f6f7f9;
+    --pass: #12805c; --pass-bg: #e7f5ef;
+    --warn: #9a6700; --warn-bg: #fdf3d8;
+    --fail: #b42318; --fail-bg: #fdecea;
+    --brand: #1f4fd8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
+    font-size: 13px; line-height: 1.6;
+  }
+  header {
+    background: #fff; border-bottom: 1px solid var(--line); padding: 14px 22px;
+    display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 20;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .5px; }
+  header .tag {
+    font-size: 11px; color: var(--brand); border: 1px solid var(--brand);
+    border-radius: 3px; padding: 1px 6px; font-weight: 600;
+  }
+  header .links { margin-left: auto; display: flex; gap: 10px; }
+  header a, header button.linkbtn {
+    color: var(--muted); text-decoration: none; font-size: 12px;
+    background: none; border: none; cursor: pointer; font-family: inherit; padding: 0;
+  }
+  header a:hover, header button.linkbtn:hover { color: var(--ink); }
+
+  .wrap { display: grid; grid-template-columns: 360px 1fr; gap: 18px; padding: 18px 22px 60px; align-items: start; }
+  @media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+
+  .card { background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .card > h2 {
+    font-size: 13px; margin: 0; padding: 11px 14px; border-bottom: 1px solid var(--line);
+    font-weight: 600; background: #fafbfc;
+  }
+  .card .body { padding: 14px; }
+
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=number], input[type=date], select, textarea {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 4px;
+    font-family: inherit; font-size: 13px; background: #fff; color: var(--ink);
+  }
+  input:focus, select:focus, textarea:focus { outline: 2px solid #cdd9f8; border-color: var(--brand); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+  button.primary {
+    width: 100%; margin-top: 14px; padding: 9px; background: var(--brand); color: #fff;
+    border: none; border-radius: 4px; font-size: 13px; font-family: inherit;
+    cursor: pointer; font-weight: 600;
+  }
+  button.primary:hover { background: #1a44bd; }
+  button.primary:disabled { background: #9aa8c9; cursor: not-allowed; }
+  button.ghost {
+    padding: 7px 14px; background: #fff; border: 1px solid var(--line); border-radius: 4px;
+    font-family: inherit; font-size: 13px; cursor: pointer; color: var(--ink);
+  }
+  button.ghost:hover { border-color: #b9c0cc; }
+  button.danger { color: var(--fail); border-color: #f2c4bf; }
+  button.ok { color: var(--pass); border-color: #b6ddc9; }
+
+  .empty { text-align: center; color: var(--muted); padding: 60px 20px; font-size: 13px; }
+  .empty .big { font-size: 30px; margin-bottom: 8px; opacity: .5; }
+
+  /* 结论横幅 */
+  .banner { padding: 14px 16px; border-radius: 6px; margin-bottom: 14px; border: 1px solid; }
+  .banner .verdict { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
+  .banner .sub { font-size: 12px; margin-top: 3px; opacity: .85; }
+  .banner.approved { background: var(--pass-bg); border-color: #b6ddc9; color: var(--pass); }
+  .banner.rejected { background: var(--fail-bg); border-color: #f2c4bf; color: var(--fail); }
+  .banner.pending  { background: var(--warn-bg); border-color: #ecd9a0; color: var(--warn); }
+  .banner.done { background: #eef1f6; border-color: #ccd3de; color: #39414f; }
+
+  /* 规则表 */
+  table.rules { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.rules th {
+    text-align: left; font-weight: 600; color: var(--muted); font-size: 11px;
+    padding: 7px 10px; border-bottom: 1px solid var(--line); background: #fafbfc;
+  }
+  table.rules td { padding: 8px 10px; border-bottom: 1px solid #f0f2f5; vertical-align: top; }
+  table.rules tr:last-child td { border-bottom: none; }
+  .rid { font-family: Consolas, monospace; font-size: 11.5px; color: var(--muted); }
+  .sev {
+    display: inline-block; font-size: 10.5px; font-weight: 700; padding: 1px 7px;
+    border-radius: 3px; letter-spacing: .4px;
+  }
+  .sev.PASS { background: var(--pass-bg); color: var(--pass); }
+  .sev.WARN { background: var(--warn-bg); color: var(--warn); }
+  .sev.FAIL { background: var(--fail-bg); color: var(--fail); }
+  .clause { font-size: 11px; color: var(--muted); }
+  details { margin-top: 5px; }
+  details summary {
+    cursor: pointer; font-size: 11px; color: var(--brand); list-style: none;
+    display: inline-block; user-select: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary:before { content: "▸ "; }
+  details[open] summary:before { content: "▾ "; }
+  details pre {
+    margin: 6px 0 0; padding: 8px 10px; background: #f7f8fa; border: 1px solid var(--line);
+    border-radius: 4px; font-size: 11px; overflow-x: auto; white-space: pre-wrap;
+    font-family: Consolas, monospace; color: #374151;
+  }
+
+  /* 凭证 */
+  .voucher { font-family: Consolas, monospace; font-size: 12.5px; }
+  .voucher .line { display: flex; padding: 4px 0; border-bottom: 1px dashed #eceff3; }
+  .voucher .dir { width: 34px; color: var(--muted); }
+  .voucher .acct { flex: 1; }
+  .voucher .amt { width: 110px; text-align: right; }
+  .voucher .sum { display: flex; padding-top: 7px; font-weight: 600; }
+  .bal { font-size: 11px; padding: 1px 7px; border-radius: 3px; margin-left: 8px; }
+  .bal.ok { background: var(--pass-bg); color: var(--pass); }
+  .bal.bad { background: var(--fail-bg); color: var(--fail); }
+
+  /* 叙述 */
+  .narrative {
+    white-space: pre-wrap; background: #f7f8fa; border: 1px solid var(--line);
+    border-radius: 4px; padding: 11px 13px; font-size: 12.5px;
+  }
+  .src { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .src b { color: var(--warn); }
+
+  /* 决定区 */
+  .decide { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
+  .decide .who { flex: 0 0 130px; }
+  .decided {
+    margin-top: 14px; padding: 12px 14px; border-radius: 5px;
+    background: #eef1f6; border: 1px solid #ccd3de; font-size: 12.5px;
+  }
+  .decided .od { color: var(--fail); font-weight: 700; }
+
+  /* 弹窗 */
+  .overlay {
+    position: fixed; inset: 0; background: rgba(15,20,30,.45); display: none;
+    align-items: center; justify-content: center; z-index: 100; padding: 20px;
+  }
+  .overlay.on { display: flex; }
+  .modal {
+    background: #fff; border-radius: 8px; width: 100%; max-width: 520px;
+    padding: 20px 22px; box-shadow: 0 18px 50px rgba(0,0,0,.25);
+  }
+  .modal h3 { margin: 0 0 4px; font-size: 15px; }
+  .modal .lead { font-size: 12.5px; color: var(--muted); margin-bottom: 12px; }
+  .modal .cmp {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;
+  }
+  .modal .cmp > div { padding: 9px 11px; border-radius: 5px; font-size: 12px; }
+  .cmp .sys { background: var(--fail-bg); border: 1px solid #f2c4bf; }
+  .cmp .man { background: #eef1f6; border: 1px solid #ccd3de; }
+  .cmp .k { font-size: 10.5px; color: var(--muted); }
+  .cmp .v { font-weight: 700; font-size: 13px; }
+  .modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  .modal .actions .ghost { flex: 0 0 auto; }
+  .modal .actions .primary { width: auto; margin: 0; flex: 0 0 auto; padding: 8px 18px; }
+  .req { color: var(--fail); font-weight: 700; }
+
+  /* 轨迹 */
+  table.log { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  table.log th {
+    text-align: left; color: var(--muted); font-weight: 600; font-size: 10.5px;
+    padding: 6px 8px; border-bottom: 1px solid var(--line); background: #fafbfc;
+  }
+  table.log td { padding: 6px 8px; border-bottom: 1px solid #f0f2f5; font-family: Consolas, monospace; }
+  .ev { font-weight: 700; }
+  .spinner { display: inline-block; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: #1a1d23; color: #fff; padding: 9px 18px; border-radius: 5px;
+    font-size: 12.5px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 200;
+  }
+  .toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>财务报销审核台</h1>
+  <span class="tag">受控 AGENT</span>
+  <div class="links">
+    <button class="linkbtn" id="resetBtn">清空演示数据</button>
+    <a href="/docs" target="_blank">接口文档 →</a>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- 左：申请单 -->
+  <div>
+    <div class="card">
+      <h2>① 报销申请单</h2>
+      <div class="body">
+        <label>载入演示样本</label>
+        <select id="sampleSel"><option value="">— 手动上传发票 —</option></select>
+        <div class="hint" id="sampleHint">选样本会自动填好下面表单，并载入对应发票。</div>
+
+        <label>发票文件</label>
+        <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg">
+        <div class="hint" id="fileHint">未选择样本时，用这里上传 PDF 或发票图片。</div>
+
+        <div class="row2">
+          <div><label>申请人</label><input type="text" id="applicant" value="张三"></div>
+          <div><label>所属部门</label>
+            <select id="department">
+              <option>技术部</option><option>财务部</option>
+              <option>人事部</option><option>销售部</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row2">
+          <div><label>费用类型</label><input type="text" id="expense_type" value="住宿费"></div>
+          <div><label>申请金额</label><input type="text" id="amount" value="1650.00"></div>
+        </div>
+
+        <label>事由</label>
+        <input type="text" id="reason" value="上海客户现场支持">
+
+        <div class="row2">
+          <div><label>提交日期</label><input type="date" id="submit_date" value="2026-09-18"></div>
+          <div><label>住宿城市</label><input type="text" id="city" value="上海"></div>
+        </div>
+
+        <div class="row2">
+          <div><label>住宿晚数</label><input type="number" id="nights" value="3" min="0"></div>
+          <div><label>用餐人数</label><input type="number" id="headcount" min="0" placeholder="餐饮费必填"></div>
+        </div>
+
+        <button class="primary" id="runBtn">提交审核</button>
+        <div class="hint" style="margin-top:8px">
+          系统只会给出<b>建议</b>。批准或驳回由人在右侧决定。
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>审核单</h2>
+      <div class="body" id="auditList"><div class="hint">暂无记录</div></div>
+    </div>
+  </div>
+
+  <!-- 右：结果 -->
+  <div id="resultCol">
+    <div class="card"><div class="empty">
+      <div class="big">🧾</div>
+      选择一张样本票，点「提交审核」<br>
+      <span style="font-size:12px">审核结论由 17 条规则逐条算出，不经模型判断</span>
+    </div></div>
+  </div>
+
+</div>
+
+<!-- 推翻理由弹窗 -->
+<div class="overlay" id="overrideOverlay">
+  <div class="modal">
+    <h3>推翻系统建议</h3>
+    <div class="lead">
+      你的决定与系统建议相反。按制度 2.3，<span class="req">必须书面说明理由</span>，
+      该理由将与系统的原始判断一并留档，不可修改。
+    </div>
+    <div class="cmp">
+      <div class="sys"><div class="k">系统建议</div><div class="v" id="sysVerdict">—</div></div>
+      <div class="man"><div class="k">你的决定</div><div class="v" id="manVerdict">—</div></div>
+    </div>
+    <label>推翻理由（必填）</label>
+    <textarea id="overrideReason" rows="3"
+      placeholder="例：客户临时改期，超标部分员工自付，已电话确认"></textarea>
+    <div class="actions">
+      <button class="ghost" id="overrideCancel">取消</button>
+      <button class="primary" id="overrideOk" disabled>确认提交</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+
+var currentAudit = null;   // 当前展示的审核单
+var pendingDecision = null; // 待确认的推翻决定
+
+function el(id) { return document.getElementById(id); }
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function toast(msg) {
+  var t = el('toast'); t.textContent = msg; t.classList.add('on');
+  setTimeout(function () { t.classList.remove('on'); }, 2200);
+}
+function money(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  return Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function json(obj) { return JSON.stringify(obj, null, 2); }
+
+/* ---------------- 样本 ---------------- */
+function loadSamples() {
+  fetch('/api/audit/samples').then(function (r) { return r.json(); }).then(function (d) {
+    var sel = el('sampleSel');
+    (d.samples || []).forEach(function (s) {
+      var o = document.createElement('option');
+      o.value = s.key; o.textContent = s.title;
+      o.dataset.request = JSON.stringify(s.request || {});
+      o.dataset.expects = s.expects || '';
+      sel.appendChild(o);
+    });
+  });
+}
+
+el('sampleSel').addEventListener('change', function () {
+  var opt = this.options[this.selectedIndex];
+  if (!this.value) { el('sampleHint').textContent = '未选择样本，请手动上传发票。'; return; }
+  var req = JSON.parse(opt.dataset.request || '{}');
+  el('applicant').value = req.applicant || '';
+  el('department').value = req.department || '技术部';
+  el('expense_type').value = req.expense_type || '';
+  el('amount').value = req.amount || '';
+  el('reason').value = req.reason || '';
+  el('submit_date').value = req.submit_date || '';
+  el('city').value = req.city || '';
+  el('nights').value = req.nights == null ? '' : req.nights;
+  el('headcount').value = req.headcount == null ? '' : req.headcount;
+  el('fileInput').value = '';
+  el('sampleHint').innerHTML =
+    '预期命中：<b>' + esc(opt.dataset.expects || '—') + '</b>';
+});
+
+el('fileInput').addEventListener('change', function () {
+  if (this.files && this.files.length) {
+    el('sampleSel').value = '';
+    el('fileHint').textContent = '已选择：' + this.files[0].name;
+  }
+});
+
+/* ---------------- 取发票字节 ---------------- */
+function readFileAsBase64(file) {
+  return new Promise(function (resolve, reject) {
+    var fr = new FileReader();
+    fr.onload = function () {
+      var s = String(fr.result);
+      resolve({ b64: s.slice(s.indexOf(',') + 1), name: file.name });
+    };
+    fr.onerror = function () { reject(new Error('读取文件失败')); };
+    fr.readAsDataURL(file);
+  });
+}
+
+function getInvoice() {
+  var sel = el('sampleSel');
+  if (sel.value) {
+    return fetch('/api/audit/sample/' + encodeURIComponent(sel.value))
+      .then(function (r) {
+        if (!r.ok) throw new Error('样本读取失败');
+        return r.blob();
+      })
+      .then(function (blob) {
+        return readFileAsBase64(new File([blob], sel.value + '.pdf', { type: 'application/pdf' }));
+      });
+  }
+  var input = el('fileInput');
+  if (input.files && input.files.length) return readFileAsBase64(input.files[0]);
+  return Promise.reject(new Error('请先选择演示样本或上传发票文件'));
+}
+
+/* ---------------- 提交审核 ---------------- */
+el('runBtn').addEventListener('click', function () {
+  var btn = this;
+  getInvoice().then(function (inv) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner">◐</span> 审核中…';
+    return fetch('/api/audit/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        filename: inv.name,
+        content_b64: inv.b64,
+        use_vision: false,
+        request: {
+          applicant: el('applicant').value,
+          department: el('department').value,
+          expense_type: el('expense_type').value,
+          amount: el('amount').value || '0',
+          reason: el('reason').value,
+          submit_date: el('submit_date').value,
+          city: el('city').value,
+          nights: el('nights').value,
+          headcount: el('headcount').value,
+          has_itemized_list: false
+        }
+      })
+    });
+  }).then(function (r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error(d.detail || '审核失败');
+      return d;
+    });
+  }).then(function (result) {
+    currentAudit = result;
+    renderResult(result);
+    loadAuditList();
+    toast('审核完成：' + result.suggested_status);
+  }).catch(function (e) {
+    toast('✕ ' + e.message);
+  }).finally(function () {
+    btn.disabled = false;
+    btn.textContent = '提交审核';
+  });
+});
+
+/* ---------------- 渲染结果 ---------------- */
+var VERDICT_TEXT = { APPROVED: '通过', REJECTED: '驳回', PENDING: '待人工判断' };
+var STATE_TEXT = {
+  extracted: '已抽取', validated: '已校验', duplicate_checked: '已查重',
+  budget_checked: '已核预算', draft_created: '已生成凭证',
+  pending_review: '待人工复核', approved: '已批准', rejected: '已驳回'
+};
+
+function renderResult(r) {
+  var decided = !!r.decision;
+  var bannerClass = decided ? 'done' : r.suggested_status.toLowerCase();
+  var banner = '';
+  if (decided) {
+    bannerClass = r.decision === 'APPROVED' ? 'approved' : 'rejected';
+    banner = '<div class="banner ' + bannerClass + '">' +
+      '<div class="verdict">最终决定：' + VERDICT_TEXT[r.decision] + '</div>' +
+      '<div class="sub">操作人 ' + esc(r.operator) + '　系统原建议：' +
+      VERDICT_TEXT[r.suggested_status] + (r.overridden ? '　（已推翻）' : '') + '</div></div>';
+  } else {
+    banner = '<div class="banner ' + bannerClass + '">' +
+      '<div class="verdict">系统建议：' + VERDICT_TEXT[r.suggested_status] + '</div>' +
+      '<div class="sub">' + STATE_TEXT[r.state] + '　·　' +
+      '共 ' + r.findings.length + ' 条规则：' +
+      '通过 ' + count(r, 'PASS') + '　待判断 ' + count(r, 'WARN') +
+      '　驳回 ' + count(r, 'FAIL') + '</div></div>';
+  }
+
+  var html = '<div class="card"><div class="body">' + banner + '</div></div>';
+
+  /* 发票要素 */
+  var inv = r.invoice;
+  html += '<div class="card" style="margin-top:14px"><h2>② 发票要素（由文本层抽取）</h2>' +
+    '<div class="body"><table class="rules"><tbody>' +
+    kv('发票号码', inv.invoice_number) +
+    kv('开票日期', inv.issue_date) +
+    kv('购买方', inv.buyer_name + '　' + (inv.buyer_tax_id || '')) +
+    kv('销售方', inv.seller_name) +
+    kv('项目', inv.item_name) +
+    kv('价税合计', '￥' + money(inv.total) + '　（大写）' + (inv.total_in_words || '')) +
+    kv('抽取方式', inv.extraction_method === 'pdf_text' ? 'PDF 文本层（确定性，不联网）' : '视觉模型') +
+    '</tbody></table></div></div>';
+
+  /* 规则逐条 */
+  html += '<div class="card" style="margin-top:14px"><h2>③ 逐条规则判定（零 LLM，可复现）</h2>' +
+    '<table class="rules"><thead><tr>' +
+    '<th style="width:52px">规则</th><th style="width:52px">判定</th>' +
+    '<th style="width:150px">制度依据</th><th>结论</th></tr></thead><tbody>';
+  r.findings.forEach(function (f) {
+    html += '<tr>' +
+      '<td class="rid">' + esc(f.rule_id) + '</td>' +
+      '<td><span class="sev ' + f.severity + '">' + f.severity + '</span></td>' +
+      '<td class="clause">第 ' + esc(f.clause) + ' 条<br>' + esc(f.title) + '</td>' +
+      '<td>' + esc(f.message) +
+      '<details><summary>证据与制度原文</summary><pre>' +
+      esc('证据: ' + json(f.evidence) + '\n\n制度原文: ' + (f.clause_text || '—')) +
+      '</pre></details></td></tr>';
+  });
+  html += '</tbody></table></div>';
+
+  /* 叙述 */
+  html += '<div class="card" style="margin-top:14px"><h2>④ 审核意见</h2><div class="body">' +
+    '<div class="narrative">' + esc(r.narrative) + '</div>' +
+    '<div class="src">叙述来源：' +
+    (r.narrative_source === 'llm'
+      ? '语言模型（<b>已过护栏校验：出现的每个数字都能在逐条判定里找到</b>）'
+      : '系统模板（模型不可用或不守规矩时的兜底 —— 结论不受影响）') +
+    '</div></div></div>';
+
+  /* 凭证 */
+  if (r.voucher) {
+    var v = r.voucher;
+    html += '<div class="card" style="margin-top:14px"><h2>⑤ 记账凭证草稿</h2><div class="body">' +
+      '<div class="voucher">';
+    v.lines.forEach(function (l) {
+      html += '<div class="line"><span class="dir">' + l.direction + '</span>' +
+        '<span class="acct">' + esc(l.account) + '</span>' +
+        '<span class="amt">' + money(l.amount) + '</span></div>';
+    });
+    html += '<div class="sum"><span class="acct">合计</span>' +
+      '<span class="amt">' + money(v.debit_total) + '</span></div></div>' +
+      '<div class="hint">摘要：' + esc(v.summary) +
+      '<span class="bal ok">借贷平衡</span>　— 需人工确认后方可入账（制度 6.1）</div>' +
+      '</div></div>';
+  }
+
+  /* 决定 */
+  if (!decided) {
+    html += '<div class="card" style="margin-top:14px"><h2>⑥ 人工决定</h2><div class="body">' +
+      '<div class="decide">' +
+      '<input type="text" class="who" id="operator" placeholder="操作人" value="复核员">' +
+      '<button class="ghost ok" id="approveBtn">确认通过</button>' +
+      '<button class="ghost danger" id="rejectBtn">驳回</button>' +
+      '</div>' +
+      '<div class="hint" style="margin-top:10px">' +
+      'AI 出草稿，人做最终判断。推翻系统建议必须填写书面理由，理由与系统原判断一并留档。' +
+      '</div></div></div>';
+  } else if (r.override_reason) {
+    html += '<div class="card" style="margin-top:14px"><h2>⑥ 人工决定</h2><div class="body">' +
+      '<div class="decided"><span class="od">已推翻系统建议</span>　理由：' +
+      esc(r.override_reason) + '</div></div></div>';
+  }
+
+  /* 轨迹 */
+  html += '<div class="card" style="margin-top:14px"><h2>⑦ 审计轨迹（只追加，不可修改）</h2>' +
+    '<div class="body" id="logBox"><div class="hint">加载中…</div></div></div>';
+
+  el('resultCol').innerHTML = html;
+
+  if (!decided) {
+    el('approveBtn').addEventListener('click', function () { askDecide('APPROVED'); });
+    el('rejectBtn').addEventListener('click', function () { askDecide('REJECTED'); });
+  }
+  loadLog(r.audit_id);
+}
+
+function kv(k, v) {
+  return '<tr><td class="clause" style="width:110px">' + esc(k) + '</td><td>' +
+    esc(v == null || v === '' ? '—' : v) + '</td></tr>';
+}
+function count(r, sev) {
+  return r.findings.filter(function (f) { return f.severity === sev; }).length;
+}
+
+/* ---------------- 决定 ---------------- */
+function askDecide(decision) {
+  if (!currentAudit) return;
+  var operator = (el('operator') && el('operator').value || '').trim();
+  if (!operator) { toast('请先填写操作人'); return; }
+
+  var overrides = currentAudit.suggested_status !== 'PENDING' &&
+                  currentAudit.suggested_status !== decision;
+
+  if (!overrides) return submitDecide(decision, operator, '');
+
+  pendingDecision = { decision: decision, operator: operator };
+  el('sysVerdict').textContent = VERDICT_TEXT[currentAudit.suggested_status];
+  el('manVerdict').textContent = VERDICT_TEXT[decision];
+  el('overrideReason').value = '';
+  el('overrideOk').disabled = true;
+  el('overrideOverlay').classList.add('on');
+  el('overrideReason').focus();
+}
+
+el('overrideReason').addEventListener('input', function () {
+  el('overrideOk').disabled = this.value.trim().length < 4;
+});
+el('overrideCancel').addEventListener('click', function () {
+  el('overrideOverlay').classList.remove('on');
+  pendingDecision = null;
+});
+el('overrideOk').addEventListener('click', function () {
+  if (!pendingDecision) return;
+  var reason = el('overrideReason').value.trim();
+  el('overrideOverlay').classList.remove('on');
+  submitDecide(pendingDecision.decision, pendingDecision.operator, reason);
+});
+
+function submitDecide(decision, operator, reason) {
+  fetch('/api/audit/' + encodeURIComponent(currentAudit.audit_id) + '/decide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision: decision, operator: operator, override_reason: reason })
+  }).then(function (r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error(d.detail || '操作失败');
+      return d;
+    });
+  }).then(function (result) {
+    currentAudit = result;
+    renderResult(result);
+    loadAuditList();
+    toast(result.overridden ? '已批准（推翻系统建议，理由已留档）' : '已完成');
+  }).catch(function (e) { toast('✕ ' + e.message); });
+}
+
+/* ---------------- 轨迹 ---------------- */
+function loadLog(auditId) {
+  fetch('/api/audit/' + encodeURIComponent(auditId) + '/log')
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
+      var box = el('logBox');
+      if (!box) return;
+      var evs = d.events || [];
+      if (!evs.length) { box.innerHTML = '<div class="hint">暂无轨迹</div>'; return; }
+      var html = '<table class="log"><thead><tr><th style="width:150px">时间</th>' +
+        '<th style="width:130px">事件</th><th>详情</th></tr></thead><tbody>';
+      evs.forEach(function (e) {
+        var rest = Object.assign({}, e); delete rest.ts; delete rest.event;
+        html += '<tr><td>' + esc(String(e.ts).replace('T', ' ').slice(0, 19)) + '</td>' +
+          '<td class="ev">' + esc(e.event) + '</td>' +
+          '<td>' + esc(json(rest).replace(/\s+/g, ' ')) + '</td></tr>';
+      });
+      box.innerHTML = html + '</tbody></table>';
+    })
+    .catch(function () {
+      var box = el('logBox'); if (box) box.innerHTML = '<div class="hint">轨迹读取失败</div>';
+    });
+}
+
+/* ---------------- 审核单列表 ---------------- */
+function loadAuditList() {
+  fetch('/api/audit/list').then(function (r) { return r.json(); }).then(function (d) {
+    var box = el('auditList');
+    var items = d.audits || [];
+    if (!items.length) { box.innerHTML = '<div class="hint">暂无记录</div>'; return; }
+    var html = '<table class="rules"><tbody>';
+    items.slice(0, 12).forEach(function (a) {
+      var label = a.decision ? VERDICT_TEXT[a.decision] : VERDICT_TEXT[a.suggested_status];
+      var cls = (a.decision || a.suggested_status || 'PENDING').toLowerCase();
+      html += '<tr style="cursor:pointer" onclick="openAudit(\'' + esc(a.audit_id) + '\')">' +
+        '<td><span class="sev ' + (cls === 'approved' ? 'PASS' : cls === 'rejected' ? 'FAIL' : 'WARN') +
+        '">' + esc(label) + '</span></td>' +
+        '<td>' + esc(a.expense_type || '—') + '<div class="clause">' +
+        esc(a.invoice_number || '') + '</div></td>' +
+        '<td style="text-align:right">￥' + money(a.amount) + '</td></tr>';
+    });
+    box.innerHTML = html + '</tbody></table>';
+  });
+}
+
+function openAudit(id) {
+  fetch('/api/audit/' + encodeURIComponent(id)).then(function (r) { return r.json(); })
+    .then(function (d) { currentAudit = d; renderResult(d); window.scrollTo(0, 0); });
+}
+
+/* ---------------- 重置 ---------------- */
+el('resetBtn').addEventListener('click', function () {
+  if (!confirm('清空全部审核单与审计轨迹？\n\n演示前必须做这一步，否则排练跑过的单子\n会让正式演示的第一张样本触发"重复报销"。')) return;
+  fetch('/api/audit/reset', { method: 'POST' }).then(function (r) { return r.json(); })
+    .then(function (d) {
+      toast('已清空 ' + d.removed + ' 个文件');
+      loadAuditList();
+      currentAudit = null;
+      el('resultCol').innerHTML = '<div class="card"><div class="empty">' +
+        '<div class="big">🧾</div>已重置，可以开始演示</div></div>';
+    });
+});
+
+/* ---------------- 启动 ---------------- */
+window.addEventListener('load', function () {
+  loadSamples();
+  loadAuditList();
+});
+</script>
+</body>
+</html>
