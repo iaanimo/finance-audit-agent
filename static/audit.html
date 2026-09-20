@@ -53,6 +53,12 @@
   input:focus, select:focus, textarea:focus { outline: 2px solid #cdd9f8; border-color: var(--brand); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .notice {
+    margin-top: 10px; padding: 9px 11px; border-radius: 5px; font-size: 12px;
+    background: var(--warn-bg); border: 1px solid #ecd9a0; color: #6b4a00;
+    line-height: 1.65;
+  }
+  .notice .em { font-weight: 700; text-decoration: underline; }
 
   button.primary {
     width: 100%; margin-top: 14px; padding: 9px; background: var(--brand); color: #fff;
@@ -189,7 +195,7 @@
   <h1>财务报销审核台</h1>
   <span class="tag">受控 AGENT</span>
   <div class="links">
-    <button class="linkbtn" id="resetBtn">清空演示数据</button>
+    <button class="linkbtn" id="resetBtn" title="仅演示环境使用。真实系统里会计凭证与审计轨迹依法至少保存 30 年，只能红冲、不能删除。">清空演示数据（仅演示环境）</button>
     <a href="/docs" target="_blank">接口文档 →</a>
   </div>
 </header>
@@ -208,6 +214,12 @@
         <label>发票文件</label>
         <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg">
         <div class="hint" id="fileHint">未选择样本时，用这里上传 PDF 或发票图片。</div>
+
+        <div class="notice" id="manualNotice" style="display:none">
+          <b>手动上传时申请单已清空。</b>
+          请<span class="em">对照发票逐项填写</span>，不要凭记忆填 ——
+          金额、人数、晚数这类字段若与票面不符，会直接改变审核结论。
+        </div>
 
         <div class="row2">
           <div><label>申请人</label><input type="text" id="applicant" value="张三"></div>
@@ -335,6 +347,7 @@ el('sampleSel').addEventListener('change', function () {
   el('nights').value = req.nights == null ? '' : req.nights;
   el('headcount').value = req.headcount == null ? '' : req.headcount;
   el('fileInput').value = '';
+  el('manualNotice').style.display = 'none';   // 选了样本，撤掉手动上传的提示
   el('sampleHint').innerHTML =
     '预期命中：<b>' + esc(opt.dataset.expects || '—') + '</b>';
 });
@@ -343,8 +356,24 @@ el('fileInput').addEventListener('change', function () {
   if (this.files && this.files.length) {
     el('sampleSel').value = '';
     el('fileHint').textContent = '已选择：' + this.files[0].name;
+    clearRequestForm();
   }
 });
+
+/* 手动上传时清空申请单 —— 防呆。
+ *
+ * 为什么必须清空：表单里预留着演示样本的默认值（张三/1650.00/上海/3晚）。
+ * 用户上传自己的发票后，很容易以为"传了文件就填好了"直接提交。
+ * 金额不符会被 R010 抓住，但晚数、人数、城市这类字段若恰巧与票面一致，
+ * 就会带着错误的申报数据通过审核。
+ *
+ * 财务系统的原则是让人没法顺手犯错 —— 宁可多填一次，不可带着旧值提交。
+ */
+function clearRequestForm() {
+  ['applicant', 'expense_type', 'amount', 'reason', 'city', 'nights', 'headcount']
+    .forEach(function (id) { var e = el(id); if (e) e.value = ''; });
+  el('manualNotice').style.display = 'block';
+}
 
 /* ---------------- 取发票字节 ---------------- */
 function readFileAsBase64(file) {
@@ -648,7 +677,10 @@ function openAudit(id) {
 
 /* ---------------- 重置 ---------------- */
 el('resetBtn').addEventListener('click', function () {
-  if (!confirm('清空全部审核单与审计轨迹？\n\n演示前必须做这一步，否则排练跑过的单子\n会让正式演示的第一张样本触发"重复报销"。')) return;
+  if (!confirm('清空全部审核单与审计轨迹？\n\n' +
+      '演示前必须做这一步，否则排练跑过的单子\n会让正式演示的第一张样本触发"重复报销"。\n\n' +
+      '注意：这是【物理删除】，仅限演示环境。\n' +
+      '真实系统里会计凭证与审计轨迹依法至少保存 30 年，\n只能红冲、不能删除。')) return;
   fetch('/api/audit/reset', { method: 'POST' }).then(function (r) { return r.json(); })
     .then(function (d) {
       toast('已清空 ' + d.removed + ' 个文件');
