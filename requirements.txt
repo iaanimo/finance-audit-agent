@@ -1,0 +1,33 @@
+# 财务报销审核受控 Agent —— 运行依赖
+#
+# 设计上刻意保持精简：审核主链路（抽取 -> 17 条规则 -> 凭证 -> 人工决定）
+# 只用到 pypdf + pyyaml，**不需要任何机器学习库**。
+# 规则引擎里没有一个模型调用，这是本项目的核心主张。
+
+# Web 服务
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.0
+
+# 制度与规则配置
+pyyaml>=6.0
+
+# 发票 PDF 文本层抽取（确定性路径，不联网）
+#
+# ⚠️ 这里**必须有上界**。pypdf 各版本对「字间距」的判定阈值不同：票面标题带
+# letter-spacing 时，新版会把字与字之间抽成一个空格，字段抽取会静默失效。
+# 抽取层已按「容忍字间距」加固（见 finance/extractor.py 的 _RE_LETTER_SPACED），
+# 上界是第二道保险 —— 别让依赖随 pip 自由漂移。
+pypdf>=4.0.0,<7.0.0
+
+# 测试框架 —— README 里让你跑 pytest，所以它必须是明示依赖，
+# 否则别人 clone 下来照 README 操作会直接报 No module named pytest。
+pytest>=7.4
+
+# .env 支持（可选，缺了也能跑）
+python-dotenv>=1.0.0
+
+# 仅用于「审核意见叙述」的润色。
+# 注意：即使不装、不配 Key，审核结论完全不受影响，
+# 叙述会自动退化为模板文字（见 finance/guard.py）。
+langchain-openai>=0.2.0
