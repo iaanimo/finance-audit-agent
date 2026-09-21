@@ -17,14 +17,15 @@
 
 三个必须绕开的坑（都是实测出来的）
 ----------------------------------
-- ``describe_image.describe`` 内部会用 ``raise SystemExit`` 报错。``SystemExit``
-  继承 ``BaseException`` 而不是 ``Exception``，所以 ``except Exception`` **兜不住**，
-  会直接把 uvicorn 进程干掉。本模块一律用 ``except BaseException`` 接住。
-- ``describe_image`` 的 ``max_tokens`` 是硬编码的 1024，十几个字段的中文 JSON
+- ``tools.vision`` 的默认 ``max_tokens`` 是 1024，十几个字段的中文 JSON
   会被截断。本模块显式传更大的值，并且做"截断后二次解析"容错。
-- ``describe_image.mime_of()`` 不认识的扩展名一律回落成 ``image/png``。把 ``.pdf``
+- ``tools.vision.mime_of()`` 不认识的扩展名一律回落成 ``image/png``。把 ``.pdf``
   直接递过去，等于把 PDF 文件流贴上 PNG 的标签发给模型 —— 那条路是死的
   （不报错，只是永远识别不出来）。所以 PDF 必须先抠出真正的位图。
+- 历史上这个模块用 ``raise SystemExit`` 报错（继承 ``BaseException``，
+  ``except Exception`` 兜不住，缺个密钥就能把 uvicorn 进程带走）。
+  现已改为 ``VisionError``；本层仍然做兜底转换，因为这里是"允许出错的那一层"，
+  谁抛的异常都不该变成一次 500。
 """
 
 from __future__ import annotations
@@ -141,18 +142,19 @@ def extract_from_pdf(path: str | Path, source_file: str = "") -> Invoice:
 def extract_from_image(path: str | Path, timeout: int = 20) -> Invoice:
     """调 qwen-vl-max 看图，要求返回 JSON。
 
-    **注意** ``except BaseException``：``describe_image`` 内部用 ``SystemExit``
-    报错，它不是 ``Exception``，普通兜底接不住，会把 Web 进程一起带走。
+    **注意** 这里仍然兜住 ``BaseException``：``tools.vision`` 现在抛的是普通
+    ``VisionError``，但抽取层是"允许出错的那一层"，任何来自第三方的异常
+    （含 ``SystemExit`` 这种会带走 uvicorn 的）都不该越过这一层。
     """
     p = Path(path)
     try:
-        from describe_image import describe
+        from tools.vision import describe
     except ImportError as exc:  # pragma: no cover
-        raise ExtractionError("无法导入 describe_image 模块") from exc
+        raise ExtractionError("无法导入 tools.vision 模块") from exc
 
     try:
         raw = describe(str(p), prompt=VISION_PROMPT, timeout=timeout, max_tokens=2048)
-    except BaseException as exc:  # noqa: BLE001 —— 刻意接住 SystemExit
+    except BaseException as exc:  # noqa: BLE001 —— 刻意兜住一切，包括 SystemExit
         raise ExtractionError(f"视觉模型调用失败: {type(exc).__name__}: {exc}") from exc
 
     if not isinstance(raw, str) or not raw.strip():

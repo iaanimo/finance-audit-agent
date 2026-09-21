@@ -9,7 +9,9 @@
 
 - 数据目录（审核单与上传件落盘位置）
 - 叙事模型（把规则结论翻译成人话，**不参与任何判定**）
-- 视觉模型（仅当 PDF 没有文本层、需要识别扫描件时用）
+
+视觉模型的密钥**不在这里** —— ``tools/vision.py`` 自己读 ``VISION_API_KEY``。
+一个密钥只有一处来源，比"两处都写着、只有一处真的生效"安全。
 """
 
 from __future__ import annotations
@@ -38,13 +40,9 @@ class Settings:
     data_dir: Path
 
     # LLM（仅用于生成审核意见的叙述，不参与任何判定）
-    llm_provider: str
     api_key: str
     base_url: str
     model: str
-
-    # 视觉（仅用于"PDF 没有文本层"时的兜底抽取）
-    vision_api_key: str
 
     @property
     def audits_dir(self) -> Path:
@@ -60,9 +58,7 @@ def get_settings() -> Settings:
     return Settings(
         project_root=PROJECT_ROOT,
         data_dir=PROJECT_ROOT / "data",
-        llm_provider=os.getenv("LLM_PROVIDER", "deepseek"),
         api_key=os.getenv("DEEPSEEK_API_KEY", "") or os.getenv("OPENAI_API_KEY", ""),
         base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
-        vision_api_key=os.getenv("VISION_API_KEY", ""),
     )

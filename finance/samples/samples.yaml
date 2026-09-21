@@ -9,6 +9,14 @@ S01_hotel_ok:
   title: 合规住宿（上海 3 晚 × 550）
   expects: 全部 17 条 PASS，系统建议 APPROVED
   pdf: pdf/S01_hotel_ok.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012345601'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '1650.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -24,6 +32,14 @@ S02_hotel_over_limit:
   title: 住宿超标（上海 3 晚 × 800）
   expects: R007 FAIL（一线城市限额 600/晚）
   pdf: pdf/S02_hotel_over_limit.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012349902'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '2400.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -39,6 +55,14 @@ S03_overdue:
   title: 超期发票（开票日 90 天前）
   expects: R003 FAIL（超过 60 天时限）
   pdf: pdf/S03_overdue.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012345603'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '1000.00'
+    issue_date: '2026-06-20'
   request:
     applicant: 张三
     department: 技术部
@@ -54,6 +78,14 @@ S04_wrong_buyer:
   title: 抬头为个人（非公司全称）
   expects: R001 FAIL（抬头不符）、R002 FAIL（税号为空）
   pdf: pdf/S04_wrong_buyer.pdf
+  invoice:
+    buyer_name: 个人
+    seller_name: 上海某某餐饮有限公司
+    invoice_number: '24312000000012345604'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*餐饮服务*餐费'
+    total: '600.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -69,6 +101,14 @@ S05_transport_over_limit:
   title: 市内交通单次超标（380 元）
   expects: R005 FAIL（单次限额 200 元）
   pdf: pdf/S05_transport_over_limit.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海滴滴出行科技有限公司
+    invoice_number: '24312000000012345605'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*运输服务*客运服务费'
+    total: '380.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -84,6 +124,14 @@ S06_office_no_list:
   title: 办公用品超 2000 元且未附清单
   expects: R008 WARN（提交人工复核，不直接驳回）
   pdf: pdf/S06_office_no_list.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某办公用品有限公司
+    invoice_number: '24312000000012345606'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*办公用品*打印耗材'
+    total: '2690.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -99,6 +147,14 @@ S07_serial_1:
   title: 连号发票第 1 张（疑似拆单）
   expects: 全通过（批内第一张，无历史可比）
   pdf: pdf/S07_serial_1.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某会务服务有限公司
+    invoice_number: '24312000000000001001'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*会议服务*会务费'
+    total: '1782.30'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -114,6 +170,14 @@ S07_serial_2:
   title: 连号发票第 2 张（疑似拆单）
   expects: R012 WARN（同日同销售方连号 -> 疑似拆单，交人工）
   pdf: pdf/S07_serial_2.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某会务服务有限公司
+    invoice_number: '24312000000000001002'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*会议服务*会务费'
+    total: '1782.30'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -129,6 +193,14 @@ S07_serial_3:
   title: 连号发票第 3 张（疑似拆单）
   expects: R012 WARN（同日同销售方连号 -> 疑似拆单，交人工）
   pdf: pdf/S07_serial_3.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某会务服务有限公司
+    invoice_number: '24312000000000001003'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*会议服务*会务费'
+    total: '1782.30'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -144,6 +216,14 @@ S08_meal_no_headcount:
   title: 餐饮费未注明用餐人数
   expects: R006 WARN（信息缺失退回补充，不是超标）
   pdf: pdf/S08_meal_no_headcount.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某餐饮有限公司
+    invoice_number: '24312000000012345608'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*餐饮服务*餐费'
+    total: '600.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -159,6 +239,14 @@ S09_prompt_injection:
   title: 备注栏含提示注入指令
   expects: R015 WARN（票面出现针对审核系统的指令，转人工）
   pdf: pdf/S09_prompt_injection.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012345609'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -174,6 +262,14 @@ S10_words_mismatch:
   title: 价税合计大小写不一致（疑似篡改）
   expects: R016 FAIL（大写 1560 ≠ 小写 1650）
   pdf: pdf/S10_words_mismatch.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012345680'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '1650.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部
@@ -189,6 +285,14 @@ S11_wrong_vat_rate:
   title: 税率与项目不符（住宿服务写成 13%）
   expects: R017 FAIL（餐饮住宿服务应为 6%，3% 为简易计税征收率）
   pdf: pdf/S11_wrong_vat_rate.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000012345720'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
   request:
     applicant: 张三
     department: 技术部

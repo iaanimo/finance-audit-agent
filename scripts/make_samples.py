@@ -22,6 +22,9 @@
 
 from __future__ import annotations
 
+import argparse
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -34,10 +37,15 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES_DIR = PROJECT_ROOT / "finance" / "samples"
 
+#: Edge 的常见安装位置。**只是兜底** —— 先看 EDGE_PATH 环境变量，再看 PATH。
+#: 只认这两条 Windows 绝对路径的话，`.gitignore` 里"任何人 clone 下来都能
+#: 重新生成同一批样本"这句承诺对 Linux/macOS 或装在别处的机器就不成立了。
 EDGE_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
+
+_EDGE_ON_PATH = ("msedge", "msedge.exe", "microsoft-edge", "microsoft-edge-stable")
 
 # 演示用的固定"今天"，让样本的时限判定可复现
 SUBMIT_DATE = date(2026, 9, 18)
@@ -402,13 +410,33 @@ def render_html(sample: Sample) -> str:
 
 
 def find_edge() -> Path:
+    """按 环境变量 -> PATH -> 常见安装位置 的顺序找 Edge。
+
+    ``EDGE_PATH`` 让装在别处的机器（Linux 上的 chromium 也算）不必改代码；
+    PATH 查找让"装是装了但不在默认目录"的情况也能过。
+    """
+    env = os.getenv("EDGE_PATH", "").strip()
+    if env:
+        p = Path(env)
+        if p.is_file():
+            return p
+        raise SystemExit(f"EDGE_PATH 指向的文件不存在：{env}")
+
+    for name in _EDGE_ON_PATH:
+        found = shutil.which(name)
+        if found:
+            return Path(found)
+
     for candidate in EDGE_CANDIDATES:
         p = Path(candidate)
         if p.is_file():
             return p
+
     raise SystemExit(
-        "找不到 Microsoft Edge。本脚本依赖 Edge 的 headless 模式把 HTML 渲染成 PDF。\n"
-        "已查找：" + "\n  ".join(EDGE_CANDIDATES)
+        "找不到 Microsoft Edge（或兼容的 Chromium）。本脚本用它的 headless 模式把 HTML 渲染成 PDF。\n"
+        "已查找：\n  环境变量 EDGE_PATH\n  PATH 上的 " + "、".join(_EDGE_ON_PATH) + "\n  "
+        + "\n  ".join(EDGE_CANDIDATES)
+        + "\n\n提示：设一个 EDGE_PATH 指向浏览器可执行文件即可。"
     )
 
 
@@ -429,39 +457,68 @@ def html_to_pdf(edge: Path, html_path: Path, pdf_path: Path) -> None:
     )
 
 
+def manifest_entry(s: Sample) -> dict:
+    """一个样本在 ``samples.yaml`` 里的全部内容。
+
+    ``invoice`` 段是**票面应当长什么样**的显式声明，供评测脚本逐字段核对
+    抽取结果。评测脚本过去靠"抬头不等于公司全称就跳过核对"这类启发式来
+    绕过特例，那个开关一开就整张票不查了 —— 现在不猜，写清楚。
+    """
+    return {
+        "title": s.title,
+        "expects": s.expects,
+        "pdf": f"pdf/{s.key}.pdf",
+        "invoice": {
+            "buyer_name": s.buyer_name,
+            "seller_name": s.seller_name,
+            "invoice_number": s.invoice_number,
+            "invoice_type": s.invoice_type,
+            "item_name": s.item_name,
+            "total": s.total,
+            "issue_date": s.issue_date.isoformat(),
+        },
+        "request": {
+            "applicant": s.applicant,
+            "department": s.department,
+            "expense_type": s.expense_type,
+            "amount": s.resolved_amount(),
+            "reason": s.reason,
+            "submit_date": SUBMIT_DATE.isoformat(),
+            "city": s.city,
+            "nights": s.nights,
+            "headcount": s.headcount,
+            "has_itemized_list": s.has_itemized_list,
+        },
+    }
+
+
 def main() -> int:
-    edge = find_edge()
-    (SAMPLES_DIR / "html").mkdir(parents=True, exist_ok=True)
-    (SAMPLES_DIR / "pdf").mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description="生成合成样本票与样本清单")
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="只重写 samples.yaml，不重新渲染 PDF（不需要 Edge）",
+    )
+    args = parser.parse_args()
 
     samples = build_samples()
     manifest: dict[str, dict] = {}
 
-    with tempfile.TemporaryDirectory() as _tmp:
-        for s in samples:
-            html_path = SAMPLES_DIR / "html" / f"{s.key}.html"
-            pdf_path = SAMPLES_DIR / "pdf" / f"{s.key}.pdf"
-            html_path.write_text(render_html(s), encoding="utf-8")
-            html_to_pdf(edge, html_path, pdf_path)
-            print(f"  OK  {s.key}.pdf  <- {s.title}")
+    if not args.manifest_only:
+        edge = find_edge()
+        (SAMPLES_DIR / "html").mkdir(parents=True, exist_ok=True)
+        (SAMPLES_DIR / "pdf").mkdir(parents=True, exist_ok=True)
 
-            manifest[s.key] = {
-                "title": s.title,
-                "expects": s.expects,
-                "pdf": f"pdf/{s.key}.pdf",
-                "request": {
-                    "applicant": s.applicant,
-                    "department": s.department,
-                    "expense_type": s.expense_type,
-                    "amount": s.resolved_amount(),
-                    "reason": s.reason,
-                    "submit_date": SUBMIT_DATE.isoformat(),
-                    "city": s.city,
-                    "nights": s.nights,
-                    "headcount": s.headcount,
-                    "has_itemized_list": s.has_itemized_list,
-                },
-            }
+        with tempfile.TemporaryDirectory() as _tmp:
+            for s in samples:
+                html_path = SAMPLES_DIR / "html" / f"{s.key}.html"
+                pdf_path = SAMPLES_DIR / "pdf" / f"{s.key}.pdf"
+                html_path.write_text(render_html(s), encoding="utf-8")
+                html_to_pdf(edge, html_path, pdf_path)
+                print(f"  OK  {s.key}.pdf  <- {s.title}")
+
+    for s in samples:
+        manifest[s.key] = manifest_entry(s)
 
     manifest_path = SAMPLES_DIR / "samples.yaml"
     header = (

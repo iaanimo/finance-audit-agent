@@ -1229,23 +1229,49 @@ def test_extract_unsupported_suffix(tmp_path):
 
 
 def test_vision_extract_survives_systemexit(monkeypatch, tmp_path):
-    """`describe_image` 用 SystemExit 报错，它不是 Exception。
+    """抽取层必须兜住**任何**异常，包括会带走 uvicorn 的 SystemExit。
 
-    如果抽取层只写 `except Exception`，缺密钥时会把整个 uvicorn 进程带走。
-    这条测试把这个坑钉死。
+    两条防线，各测各的：
+
+    1. ``tools.vision`` 自己抛的是普通 ``VisionError``（普通异常，谁都能接）；
+    2. 抽取层仍然兜 ``BaseException`` —— 万一将来又有人在这个位置上 ``raise
+       SystemExit``（继承 ``BaseException``，``except Exception`` 接不住），
+       一个配置问题不该表现成"服务没了"。
     """
-    import describe_image
+    from tools import vision
 
     def boom(*args, **kwargs):
-        raise SystemExit("模拟：未找到 VISION_API_KEY")
+        raise SystemExit("模拟：又有人用 SystemExit 报错")
 
-    monkeypatch.setattr(describe_image, "describe", boom)
+    monkeypatch.setattr(vision, "describe", boom)
 
     p = tmp_path / "fake.png"
     p.write_bytes(b"\x89PNG\r\n\x1a\n")
 
     with pytest.raises(ExtractionError):  # 而不是 SystemExit 逃逸出去
         extract_from_image(p)
+
+
+def test_vision_module_raises_normal_exception_without_key(monkeypatch, tmp_path):
+    """缺密钥抛普通异常，不是 SystemExit。
+
+    ``SystemExit`` 继承 ``BaseException``：写 ``except Exception`` 的人接不住它，
+    结果是"没配密钥"这样一个配置问题把整个 Web 进程带走。
+    """
+    from tools import vision
+
+    monkeypatch.delenv("VISION_API_KEY", raising=False)
+    monkeypatch.delenv("HARNESS_HOME", raising=False)
+    monkeypatch.setattr(vision.Path, "home", classmethod(lambda cls: tmp_path))
+
+    with pytest.raises(vision.VisionError) as exc:
+        vision._load_api_key()
+    assert isinstance(exc.value, Exception)      # 普通异常，不是 BaseException 独苗
+    assert not isinstance(exc.value, SystemExit)
+    assert "VISION_API_KEY" in str(exc.value)
+
+    # 命令行入口遇到它要给一句话，不是一堆堆栈
+    assert vision.main([str(tmp_path / "nonexistent.png")]) == 1
 
 
 def test_loads_lenient_handles_fenced_json():
@@ -1378,20 +1404,20 @@ def test_text_layer_samples_have_no_embedded_images():
 def test_pdf_vision_fallback_never_hands_a_pdf_to_the_vision_model(monkeypatch, tmp_path):
     """回归：视觉兜底**绝不能**把整个 PDF 当图片发出去。
 
-    过去这里直接把 .pdf 路径递给 ``describe_image``，而它的 ``mime_of()`` 对
+    过去这里直接把 .pdf 路径递给视觉模块，而它的 ``mime_of()`` 对
     未知扩展名回落成 ``image/png`` —— 于是 PDF 文件流被贴上 PNG 标签发走，
     不报错，只是永远识别不出来。这是一条**静默死亡**的路径。
     """
-    import describe_image
+    from tools import vision
 
     seen = {}
 
     def fake_describe(path, prompt=None, timeout=None, max_tokens=None):
         seen["path"] = Path(path)
-        seen["mime"] = describe_image.mime_of(Path(path))
+        seen["mime"] = vision.mime_of(Path(path))
         return '{"invoice_type": "电子发票（普通发票）", "total": "1650.00"}'
 
-    monkeypatch.setattr(describe_image, "describe", fake_describe)
+    monkeypatch.setattr(vision, "describe", fake_describe)
 
     pixels = bytes([200, 220, 240]) * (16 * 16)
     pdf = make_pdf(tmp_path, image=(pixels, "/FlateDecode"))

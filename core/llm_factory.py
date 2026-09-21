@@ -25,7 +25,6 @@ class LLMNotConfigured(RuntimeError):
 
 
 def create_llm(
-    provider: str | None = None,
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,

@@ -50,28 +50,62 @@ from finance.audit import run_audit  # noqa: E402
 from finance.store import AuditStore  # noqa: E402
 
 SAMPLES_DIR = PROJECT_ROOT / "finance" / "samples"
-_RE_RULE_ID = re.compile(r"R\d{3}")
+#: ``expects`` 里的一条期望：规则号，后面**紧跟**的严重度是可选的。
+#: 只认紧跟的 —— 否则「R016 FAIL（大写 1560 ≠ 小写 1650）」后面那句里的字样
+#: 会被粘到别的规则号上。
+_RE_EXPECT = re.compile(r"(R\d{3})(?:\s*(PASS|WARN|FAIL))?")
 
 
 @dataclass
 class SampleOutcome:
     key: str
     title: str
-    expected_rules: list[str]
-    actual_non_pass: dict[str, str]      # rule_id -> severity
+    expected: dict[str, str | None]      # rule_id -> 期望严重度（None 表示只查命中）
+    actual_non_pass: dict[str, str]      # rule_id -> 实际严重度
     suggested: str
     extraction_ok: bool
     extraction_notes: list[str] = field(default_factory=list)
     error: str = ""
 
     @property
+    def expected_rules(self) -> list[str]:
+        return list(self.expected)
+
+    @property
+    def severity_mismatch(self) -> list[str]:
+        """命中了、但严重度与 ``expects`` 写的不一样。
+
+        只查"命中没命中"是不够的：把 R007 从 FAIL 降级成 WARN，
+        过去照样算"命中"—— 而 FAIL 和 WARN 在状态机里一个走向驳回、
+        一个走向转人工，是**完全不同的结论**。
+        """
+        out = []
+        for rule_id, want in self.expected.items():
+            if want is None:
+                continue
+            got = self.actual_non_pass.get(rule_id)
+            if got is not None and got != want:
+                out.append(f"{rule_id} 期望 {want}、实际 {got}")
+        return out
+
+    @property
     def hits_expected(self) -> bool:
-        """预期的规则都命中了（允许额外命中，单独算误报）。"""
-        return all(r in self.actual_non_pass for r in self.expected_rules)
+        """预期的规则都命中，且严重度对得上（允许额外命中，单独算误报）。"""
+        return all(r in self.actual_non_pass for r in self.expected) and not self.severity_mismatch
 
     @property
     def false_positives(self) -> list[str]:
-        return [r for r in self.actual_non_pass if r not in self.expected_rules]
+        return [r for r in self.actual_non_pass if r not in self.expected]
+
+    @property
+    def is_bad(self) -> bool:
+        """这张样本算不算失败。
+
+        **误报也算失败。** 过去它只在表格里挂个 ⚠️，不进 ``failed`` ——
+        于是 S01 误报 2 条时脚本照样打印「全部样本符合预期 ✅」并返回 0。
+        一个"只报喜不报忧"的评测等于没有评测。
+        """
+        return bool(self.error) or not self.hits_expected or bool(self.false_positives)
 
 
 def load_manifest() -> dict:
@@ -82,6 +116,11 @@ def load_manifest() -> dict:
             "请先运行：./.venv/Scripts/python.exe scripts/make_samples.py"
         )
     return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def parse_expects(text: str) -> dict[str, str | None]:
+    """把 ``expects`` 那句人话解析成 ``{规则号: 期望严重度}``。"""
+    return {rid: sev for rid, sev in _RE_EXPECT.findall(text or "")}
 
 
 def make_request(spec: dict) -> ReimbursementRequest:
@@ -100,29 +139,47 @@ def make_request(spec: dict) -> ReimbursementRequest:
 
 
 def check_extraction(invoice, spec: dict) -> tuple[bool, list[str]]:
-    """核对抽取字段。
+    """逐字段核对抽取结果与样本清单里**显式写出**的票面值。
 
-    只查能直接从样本清单推出的几项，**但必须覆盖规则真正依赖的字段**。
-    曾经的版本漏掉了 invoice_type，于是「字段抽取正确率 100%」在发票类型
-    全部抽成空串、13 张样本全被误杀的情况下依然显示 100% —— 指标成了摆设。
+    过去这里有个启发式：「抬头非空且不等于公司全称 → 跳过全部核对」，
+    本意是放过 S04（抬头本来就是"个人"）。它的问题是**把一条特例变成了通用开关**：
+    任何一张票只要抬头被抽错，整张票的字段核对全部跳过，指标照样满分。
+    这正是这个函数自己的注释里说"已经修好"的那个洞换了个字段重演 ——
+    所以现在不猜了，样本清单直接写明每一张票的票面值是什么。
     """
     notes: list[str] = []
-    req = spec["request"]
+    want: dict = spec.get("invoice") or {}
+    if not want:
+        return False, ["样本清单里没有 invoice 段，无法核对抽取字段"]
 
-    if invoice.buyer_name and invoice.buyer_name != "示例科技有限公司":
-        return True, ["S04 类样本：抬头本就不是公司全称，跳过核对"]
-    if not invoice.invoice_number:
-        notes.append("发票号码抽取为空")
-    if not invoice.invoice_type:
-        notes.append("发票类型抽取为空")
-    if invoice.total is None:
-        notes.append("价税合计抽取为空")
-    elif parse_money(invoice.total) != parse_money(req.get("amount", 0)):
-        notes.append(
-            f"价税合计 {invoice.total} 与样本定义 {req.get('amount')} 不一致"
-        )
-    if invoice.issue_date is None:
-        notes.append("开票日期抽取为空")
+    for field, label, is_money in (
+        ("invoice_number", "发票号码", False),
+        ("invoice_type", "发票类型", False),
+        ("buyer_name", "购买方名称", False),
+        ("seller_name", "销售方名称", False),
+        ("item_name", "项目名称", False),
+        ("total", "价税合计", True),
+    ):
+        if field not in want:
+            continue
+        expected = want[field]
+        actual = getattr(invoice, field)
+        if actual is None or actual == "":
+            notes.append(f"{label}抽取为空（样本定义 {expected!r}）")
+            continue
+        if is_money:
+            if parse_money(actual) != parse_money(expected):
+                notes.append(f"{label} {actual} 与样本定义 {expected} 不一致")
+        elif str(actual).strip() != str(expected).strip():
+            notes.append(f"{label}「{actual}」与样本定义「{expected}」不一致")
+
+    if "issue_date" in want:
+        want_date = date.fromisoformat(str(want["issue_date"]))
+        if invoice.issue_date is None:
+            notes.append(f"开票日期抽取为空（样本定义 {want_date.isoformat()}）")
+        elif invoice.issue_date != want_date:
+            notes.append(f"开票日期 {invoice.issue_date} 与样本定义 {want_date} 不一致")
+
     return (not notes), notes
 
 
@@ -136,12 +193,11 @@ async def evaluate_all() -> list[SampleOutcome]:
         store = AuditStore(base_dir=tmp)
 
         for key, spec in manifest.items():
-            expected = _RE_RULE_ID.findall(spec.get("expects", ""))
             pdf_path = SAMPLES_DIR / spec["pdf"]
             outcome = SampleOutcome(
                 key=key,
                 title=spec.get("title", ""),
-                expected_rules=expected,
+                expected=parse_expects(spec.get("expects", "")),
                 actual_non_pass={},
                 suggested="",
                 extraction_ok=True,
@@ -189,9 +245,13 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
     fp_total = sum(len(o.false_positives) for o in outcomes)
     extraction_ok = sum(1 for o in outcomes if o.extraction_ok and not o.error)
 
+    severity_mismatches = [m for o in outcomes for m in o.severity_mismatch]
+    extraction_total = sum(1 for o in outcomes if not o.error)
     recall = (expected_hit / expected_total * 100) if expected_total else 100.0
     completion = (completed / total * 100) if total else 0.0
-    extraction_rate = (extraction_ok / total * 100) if total else 0.0
+    extraction_rate = (
+        (extraction_ok / extraction_total * 100) if extraction_total else 0.0
+    )
 
     lines: list[str] = []
     lines.append("# 报销审核规则 —— 评测报告")
@@ -210,10 +270,16 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
         f"| 规则召回率 | {recall:.1f}% | 预期命中的 {expected_total} 个**期望实例**中，"
         f"实际命中 {expected_hit} 个（覆盖 {len(distinct_expected)} 条不同规则） |"
     )
-    lines.append(f"| 误报数 | {fp_total} | 未预期命中却命中的规则条数 |")
     lines.append(
-        f"| 字段抽取正确率 | {extraction_rate:.1f}% | {extraction_ok}/{total} 张样本"
-        "抽取字段与样本定义一致 |"
+        f"| 误报数 | {fp_total} | 未预期命中却命中的规则条数（**计入失败**） |"
+    )
+    lines.append(
+        f"| 严重度一致 | {len(severity_mismatches)} | 命中但严重度与预期不符的条数"
+        "（FAIL 与 WARN 走向完全不同的结论） |"
+    )
+    lines.append(
+        f"| 字段抽取正确率 | {extraction_rate:.1f}% | {extraction_ok}/{extraction_total} "
+        "张跑完的样本抽取字段与样本清单一致 |"
     )
     lines.append("")
     lines.append("## 逐样本明细")
@@ -222,15 +288,17 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
     lines.append("|---|---|---|---|---|")
 
     for o in outcomes:
+        expected = (
+            "、".join(f"{r}={s}" if s else r for r, s in o.expected.items()) or "（全通过）"
+        )
         if o.error:
-            lines.append(f"| {o.key} | {'/'.join(o.expected_rules) or '—'} | — | — | ❌ 异常 |")
+            lines.append(f"| {o.key} | {expected} | — | — | ❌ 异常 |")
             continue
-        expected = "/".join(o.expected_rules) or "（全通过）"
         actual = "、".join(f"{k}={v}" for k, v in o.actual_non_pass.items()) or "（全通过）"
         if not o.hits_expected:
-            verdict = "❌ 漏报"
+            verdict = "❌ 与预期不符"
         elif o.false_positives:
-            verdict = "⚠️ 有误报"
+            verdict = "⚠️ 有误报（计入失败）"
         else:
             verdict = "✅"
         lines.append(f"| {o.key} | {expected} | {actual} | {o.suggested} | {verdict} |")
@@ -256,8 +324,10 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
         "completion": completion,
         "recall": recall,
         "false_positives": fp_total,
+        "severity_mismatches": severity_mismatches,
         "extraction_rate": extraction_rate,
-        "failed": [o.key for o in outcomes if not o.hits_expected or o.error],
+        # 误报、严重度不符、抽取不符，全部计入失败 —— 退出码要能反映它们
+        "failed": [o.key for o in outcomes if o.is_bad or not o.extraction_ok],
     }
     return "\n".join(lines) + "\n", metrics
 
@@ -283,7 +353,10 @@ def main() -> int:
     ok = not metrics["failed"]
     print()
     print("=" * 56)
-    print("评测结论：" + ("全部样本符合预期 ✅" if ok else f"存在偏差 ❌ {metrics['failed']}"))
+    if ok:
+        print(f"评测结论：全部 {metrics['total']} 张样本符合预期 ✅")
+    else:
+        print(f"评测结论：存在偏差 ❌ {metrics['failed']}")
     print("=" * 56)
     return 0 if ok else 1
 
