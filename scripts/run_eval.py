@@ -178,11 +178,14 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
     completed = total - len(errored)
     with_expectation = [o for o in outcomes if o.expected_rules]
 
+    # 分母是**期望实例**不是规则条数：同一条规则可能出现在多张样本上
+    # （R012 连号就有两张），按"规则条数"报会把 12 说成 11。
     expected_total = sum(len(o.expected_rules) for o in with_expectation)
     expected_hit = sum(
         len([r for r in o.expected_rules if r in o.actual_non_pass])
         for o in with_expectation
     )
+    distinct_expected = {r for o in with_expectation for r in o.expected_rules}
     fp_total = sum(len(o.false_positives) for o in outcomes)
     extraction_ok = sum(1 for o in outcomes if o.extraction_ok and not o.error)
 
@@ -204,8 +207,8 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
         f"| 端到端完成率 | {completion:.1f}% | {completed}/{total} 张样本跑完无异常 |"
     )
     lines.append(
-        f"| 规则召回率 | {recall:.1f}% | 预期命中的 {expected_total} 条规则中，"
-        f"实际命中 {expected_hit} 条 |"
+        f"| 规则召回率 | {recall:.1f}% | 预期命中的 {expected_total} 个**期望实例**中，"
+        f"实际命中 {expected_hit} 个（覆盖 {len(distinct_expected)} 条不同规则） |"
     )
     lines.append(f"| 误报数 | {fp_total} | 未预期命中却命中的规则条数 |")
     lines.append(

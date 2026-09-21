@@ -571,7 +571,12 @@ function renderResult(r) {
     html += '<div class="sum"><span class="acct">合计</span>' +
       '<span class="amt">' + money(v.debit_total) + '</span></div></div>' +
       '<div class="hint">摘要：' + esc(v.summary) +
-      '<span class="bal ok">借贷平衡</span>　— 需人工确认后方可入账（制度 6.1）</div>' +
+      /* 只报后端算出来的结论，不在页面上写死 —— R013 会真的判不平衡（制度 6.1）。 */
+      (v.balanced
+        ? '<span class="bal ok">借贷平衡</span>　— 需人工确认后方可入账（制度 6.1）'
+        : '<span class="bal bad">借贷不平衡：借 ' + money(v.debit_total) +
+          ' / 贷 ' + money(v.credit_total) + '</span>　— 制度 6.1 要求借贷必须平衡，不得入账') +
+      '</div>' +
       '</div></div>';
   }
 
