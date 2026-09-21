@@ -25,6 +25,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import struct
+import zlib
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -455,6 +458,30 @@ def test_inv4f_stated_verdict_parsing():
     assert stated_verdict("") is None
 
 
+def test_inv4g_guard_survives_an_absurdly_long_number():
+    """护栏不能因为模型写了个超长数字就崩。
+
+    回归测试：``_normalize`` 用 ``Decimal.quantize`` 归一化，而 quantize 在
+    位数超过上下文精度（默认 28 位）时抛 ``decimal.InvalidOperation``。
+    那是个 ``ArithmeticError``，不是 ``ValueError`` —— 护栏没接，于是模型
+    随手写一串 30 位数字就能把**整条审核流程**打成 500。
+
+    护栏的职责是"拦下可疑叙述"，不是"自己也变成故障源"。
+    """
+    from finance.guard import _normalize
+
+    monster = "1234567890123456789012345678901234567890"
+    assert _normalize(monster)          # 不抛异常，且给出可比较的形式
+    assert _normalize(monster) == _normalize(monster)
+
+    findings = evaluate(make_invoice(), make_request(), load_policy_bundle())
+    text, source = guard_narrative(
+        f"该单存在金额 {monster} 元的疑点。", findings, summarize_findings(findings)
+    )
+    assert source is NarrativeSource.TEMPLATE   # 编造的数字照样被拦下
+    assert text == summarize_findings(findings)
+
+
 # ==========================================================================
 # 规则行为
 # ==========================================================================
@@ -529,6 +556,78 @@ def test_unacceptable_invoice_type_is_still_fail(policy):
     """类型写得出来但不在白名单 —— 事实性违规，必须还是 FAIL。"""
     findings = evaluate(make_invoice(invoice_type="手写收据"), make_request(), policy)
     assert finding_of(findings, "R009").severity is Severity.FAIL
+
+
+@pytest.mark.parametrize("partial", ["发票", "电子发票", "普通发票", "数电"])
+def test_partial_invoice_type_is_warn_not_pass(policy, partial):
+    """残缺的发票类型不能算通过。
+
+    回归测试：R009 过去用的是**双向**子串命中，于是「发票」两个字落在
+    「增值税电子普通发票」里面就算 PASS —— 一句话概括就是"只要票面有
+    「发票」二字，R009 就形同虚设"。
+
+    抽到的类型是白名单项的**子串**说明信息残缺：既不足以确认，也不构成
+    「不在白名单」的事实认定，所以既不是 PASS 也不是 FAIL，是 WARN 转人工。
+    """
+    findings = evaluate(make_invoice(invoice_type=partial), make_request(), policy)
+    f = finding_of(findings, "R009")
+    assert f.severity is Severity.WARN, f"「{partial}」不该被判 {f.severity}"
+    assert "人工" in f.message
+
+
+def test_full_invoice_type_still_passes(policy):
+    """方向收窄之后，白名单项被票面类型包住仍然算通过（别修过头）。"""
+    for actual in ("增值税电子普通发票", "电子发票（普通发票）", "数电票"):
+        findings = evaluate(make_invoice(invoice_type=actual), make_request(), policy)
+        f = finding_of(findings, "R009")
+        assert f.severity is Severity.PASS, f"「{actual}」被判成了 {f.severity}"
+
+
+# --------------------------------------------------------------------------
+# 票面金额抽不到时，限额类规则不许当成 0
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rule_id, over",
+    [
+        ("R005", dict(expense_type="市内交通费", city="")),
+        ("R006", dict(expense_type="餐饮费", headcount=2, city="")),
+        ("R007", dict(expense_type="住宿费", nights=3, city="上海")),
+        ("R008", dict(expense_type="办公用品", city="")),
+        ("R010", dict()),
+    ],
+)
+def test_missing_invoice_total_is_warn_not_pass(policy, rule_id, over):
+    """票面价税合计抽不到时，不能拿 0 顶替。
+
+    回归测试：这几条规则写的是 ``parse_money(ctx.invoice.total or 0)``，于是
+    "票面没抽出金额"被算成"0.00 元未超限额"并**照常 PASS** —— 假通过的
+    同时，evidence 里的 0.00 还是个编出来的数字。同类信息缺失在 R009 / R016
+    都判 WARN，这里没有理由不同。
+    """
+    req = make_request(**over)
+    findings = evaluate(make_invoice(total=None, total_in_words=""), req, policy)
+    f = finding_of(findings, rule_id)
+    assert f.severity is Severity.WARN, f"{rule_id} 判成了 {f.severity}"
+    assert "价税合计缺失" in f.message
+
+
+def test_missing_invoice_total_is_warn_for_meal_and_hotel(policy):
+    """餐饮/住宿还要额外确认：人均、每晚不能拿 0 元除出个假数字来。"""
+    inv = make_invoice(total=None, total_in_words="")
+
+    meal = finding_of(
+        evaluate(inv, make_request(expense_type="餐饮费", headcount=2, city=""), policy),
+        "R006",
+    )
+    hotel = finding_of(
+        evaluate(inv, make_request(expense_type="住宿费", nights=3, city="上海"), policy),
+        "R007",
+    )
+    for f in (meal, hotel):
+        assert f.severity is Severity.WARN
+        assert f.evidence.get("actual") is None, "没有金额就不该有算出来的单价"
 
 
 def test_duplicate_detected_via_history(policy):
@@ -1126,6 +1225,175 @@ def test_loads_lenient_handles_fenced_json():
     assert _loads_lenient('```json\n{"a": 1}\n```') == {"a": 1}
     assert _loads_lenient('好的，结果是：{"a": 1} 完成') == {"a": 1}
     assert _loads_lenient("完全不是 JSON") is None
+
+
+# --------------------------------------------------------------------------
+# 扫描件 PDF 的视觉兜底
+#
+# 手头 13 张样本全是文本层票（内嵌位图 0 张），所以这里**自己造**夹具：
+# 一个只含一张位图、没有文字层的 PDF —— 这正是一张扫描件在文件层面的样子。
+# --------------------------------------------------------------------------
+
+# 一张 1x1 的最小合法 JPEG（SOI/APP0/DQT/SOF0/DHT/SOS/EOI 齐全）。
+_MINIMAL_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a"
+    "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA"
+    "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+)
+
+
+def make_pdf(tmp_path, name="scan.pdf", image=None, size=(16, 16)):
+    """手写一个最小 PDF：一页、可选一张位图、没有文字层。
+
+    不借助 reportlab / Pillow —— 项目不引入新依赖，测试夹具也不例外。
+    ``image`` 传 ``(字节, 滤镜)``，滤镜是 ``/DCTDecode``（JPEG，原样嵌入）
+    或 ``/FlateDecode``（裸 RGB 样本，先 zlib 压一下）。
+    """
+    # 对象编号：1 目录 / 2 页树 / 3 图（可选）/ 4 页 / 5 内容流
+    image_num = 3
+    page_num = 4 if image is not None else 3
+    contents_num = page_num + 1
+
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[%d 0 R]/Count 1>>" % page_num,
+    ]
+    xobject = b""
+    if image is not None:
+        data, filt = image
+        stream = data if filt == "/DCTDecode" else zlib.compress(data)
+        xobject = b"/XObject<</Im0 %d 0 R>>" % image_num
+        objects.append(
+            b"<</Type/XObject/Subtype/Image/Width %d/Height %d"
+            b"/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter%s/Length %d>>\nstream\n"
+            % (size[0], size[1], filt.encode(), len(stream))
+            + stream
+            + b"\nendstream"
+        )
+
+    contents = b"q 200 0 0 200 0 0 cm /Im0 Do Q" if image is not None else b""
+    objects.append(
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<<"
+        + xobject
+        + b">>/Contents %d 0 R>>" % contents_num
+    )
+    objects.append(b"<</Length %d>>\nstream\n" % len(contents) + contents + b"\nendstream")
+
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objects) + 1)
+    out += b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+
+    target = tmp_path / name
+    target.write_bytes(bytes(out))
+    return target
+
+
+def test_pdf_embedded_image_becomes_png(tmp_path):
+    """扫描件页面里的裸位图要能被抠出来，并封成**合法可解**的 PNG。"""
+    from finance.extractor import extract_embedded_images
+
+    pixels = bytes([200, 220, 240]) * (16 * 16)
+    pdf = make_pdf(tmp_path, image=(pixels, "/FlateDecode"))
+
+    images = extract_embedded_images(pdf)
+    assert len(images) == 1
+    data, suffix = images[0]
+    assert suffix == ".png"
+    assert data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    # 解码回来必须是同一批像素 —— 只查文件头不算验证。
+    idat_at = data.index(b"IDAT") - 4
+    length = struct.unpack(">I", data[idat_at : idat_at + 4])[0]
+    raw = zlib.decompress(data[idat_at + 8 : idat_at + 8 + length])
+    assert len(raw) == 16 * (1 + 16 * 3)
+    assert raw[0] == 0 and raw[1:7] == pixels[:6]
+
+
+def test_pdf_embedded_jpeg_is_passed_through_verbatim(tmp_path):
+    """DCTDecode（扫描件最常见的形态）原样透传，一个字节都不许改。"""
+    from finance.extractor import extract_embedded_images
+
+    pdf = make_pdf(tmp_path, image=(_MINIMAL_JPEG, "/DCTDecode"))
+
+    images = extract_embedded_images(pdf)
+    assert len(images) == 1
+    data, suffix = images[0]
+    assert suffix == ".jpg"
+    assert data == _MINIMAL_JPEG
+    assert data[:2] == b"\xff\xd8" and data[-2:] == b"\xff\xd9"
+
+
+def test_text_layer_samples_have_no_embedded_images():
+    """13 张样本全是文本层票，内嵌位图必须是 0 张。
+
+    这条守着上一条测试的可信度：如果哪天样本被换成了扫描件，
+    这里会红，提醒去补真正的扫描件夹具。
+    """
+    pdf = SAMPLES_PDF / "S01_hotel_ok.pdf"
+    from finance.extractor import extract_embedded_images
+
+    if not pdf.is_file():
+        pytest.skip("样本票缺失，请先运行 scripts/make_samples.py")
+    assert extract_embedded_images(pdf) == []
+
+
+def test_pdf_vision_fallback_never_hands_a_pdf_to_the_vision_model(monkeypatch, tmp_path):
+    """回归：视觉兜底**绝不能**把整个 PDF 当图片发出去。
+
+    过去这里直接把 .pdf 路径递给 ``describe_image``，而它的 ``mime_of()`` 对
+    未知扩展名回落成 ``image/png`` —— 于是 PDF 文件流被贴上 PNG 标签发走，
+    不报错，只是永远识别不出来。这是一条**静默死亡**的路径。
+    """
+    import describe_image
+
+    seen = {}
+
+    def fake_describe(path, prompt=None, timeout=None, max_tokens=None):
+        seen["path"] = Path(path)
+        seen["mime"] = describe_image.mime_of(Path(path))
+        return '{"invoice_type": "电子发票（普通发票）", "total": "1650.00"}'
+
+    monkeypatch.setattr(describe_image, "describe", fake_describe)
+
+    pixels = bytes([200, 220, 240]) * (16 * 16)
+    pdf = make_pdf(tmp_path, image=(pixels, "/FlateDecode"))
+
+    inv = extract(pdf, use_vision=True)
+
+    assert seen["path"].suffix != ".pdf", "把 PDF 本身当成图片发出去了"
+    assert seen["mime"] == "image/png"
+    assert inv.extraction_method == "vision"
+    assert inv.invoice_type == "电子发票（普通发票）"
+
+
+def test_pdf_without_text_or_images_says_what_to_do(tmp_path):
+    """既没有文字层、也没有内嵌位图 —— 报错要能读到下一步该怎么办。"""
+    pdf = make_pdf(tmp_path, image=None)
+
+    with pytest.raises(ExtractionError) as exc:
+        extract(pdf, use_vision=True)
+
+    message = str(exc.value)
+    assert "内嵌位图" in message and "jpg" in message
+
+
+def test_pdf_vision_fallback_is_off_by_default(tmp_path):
+    """``use_vision=False``（默认）时不联网，直接抛文本层那条错。"""
+    pdf = make_pdf(tmp_path, image=(bytes([1, 2, 3]) * 256, "/FlateDecode"))
+
+    with pytest.raises(ExtractionError):
+        extract(pdf)
 
 
 # ==========================================================================

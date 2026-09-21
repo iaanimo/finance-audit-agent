@@ -12,21 +12,28 @@
    直接读出来用正则解析。可复现、零成本、零延迟。**主演示路径走这条。**
 2. **视觉模型（兜底，联网）** —— 拍照件、扫描件、或者版式对不上的，
    交给 qwen-vl-max 看图转 JSON。默认**关闭**（``use_vision=False``），
-   因为演示时不该依赖网络。
+   因为演示时不该依赖网络。扫描件的 PDF 会先把页面内嵌的位图抠出来
+   （见 :func:`extract_embedded_images`），**绝不把整个 PDF 当图片发出去**。
 
-两个必须绕开的坑（都是实测出来的）
+三个必须绕开的坑（都是实测出来的）
 ----------------------------------
 - ``describe_image.describe`` 内部会用 ``raise SystemExit`` 报错。``SystemExit``
   继承 ``BaseException`` 而不是 ``Exception``，所以 ``except Exception`` **兜不住**，
   会直接把 uvicorn 进程干掉。本模块一律用 ``except BaseException`` 接住。
 - ``describe_image`` 的 ``max_tokens`` 是硬编码的 1024，十几个字段的中文 JSON
   会被截断。本模块显式传更大的值，并且做"截断后二次解析"容错。
+- ``describe_image.mime_of()`` 不认识的扩展名一律回落成 ``image/png``。把 ``.pdf``
+  直接递过去，等于把 PDF 文件流贴上 PNG 的标签发给模型 —— 那条路是死的
+  （不报错，只是永远识别不出来）。所以 PDF 必须先抠出真正的位图。
 """
 
 from __future__ import annotations
 
 import json
 import re
+import struct
+import tempfile
+import zlib
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -87,11 +94,8 @@ def extract(
         except ExtractionError as pdf_exc:
             if not use_vision:
                 raise
-            # PDF 文本层读不出来（扫描件？）—— 转视觉兜底
-            try:
-                return extract_from_image(p, timeout=vision_timeout)
-            except ExtractionError:
-                raise pdf_exc
+            # PDF 文本层读不出来（扫描件？）—— 抠出内嵌位图再转视觉兜底
+            return _extract_pdf_via_vision(p, pdf_exc, vision_timeout)
 
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
         return extract_from_image(p, timeout=vision_timeout)
@@ -120,7 +124,7 @@ def extract_from_pdf(path: str | Path, source_file: str = "") -> Invoice:
 
     text = _normalize_text(text)
     if not text.strip():
-        raise ExtractionError("PDF 没有可提取的文本层（可能是扫描件，请改用图片路径）")
+        raise ExtractionError("PDF 没有可提取的文本层（可能是整页只有一张图的扫描件）")
 
     invoice = _parse_invoice_text(text)
     invoice.raw_text = text
@@ -163,6 +167,153 @@ def extract_from_image(path: str | Path, timeout: int = 20) -> Invoice:
     invoice.source_file = p.name
     invoice.extraction_method = "vision"
     return invoice
+
+
+def _extract_pdf_via_vision(
+    pdf_path: Path, pdf_exc: ExtractionError, timeout: int
+) -> Invoice:
+    """PDF 走视觉兜底：先把页面内嵌的位图抠出来，再逐张送去识别。
+
+    抠不出图就**明确报错**，不再像过去那样把整份 PDF 当 PNG 发出去。
+    """
+    images = extract_embedded_images(pdf_path)
+    if not images:
+        raise ExtractionError(
+            f"{pdf_exc}；并且在这个 PDF 里没有找到内嵌位图，视觉兜底无从下手。"
+            "请改传扫描件的图片文件（jpg/png）。"
+        ) from pdf_exc
+
+    last_exc: ExtractionError | None = None
+    for index, (data, suffix) in enumerate(images, start=1):
+        tmp_path: Path | None = None
+        try:
+            # describe_image 只认文件路径，所以先落一个带正确扩展名的临时文件 ——
+            # 扩展名不是小事，mime_of() 就是靠它决定发给模型的是 image/png 还是 image/jpeg。
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+                fh.write(data)
+                tmp_path = Path(fh.name)
+            return extract_from_image(tmp_path, timeout=timeout)
+        except ExtractionError as exc:
+            last_exc = exc
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    raise ExtractionError(
+        f"PDF 内嵌的 {len(images)} 张位图都没能识别成功：{last_exc}"
+    ) from last_exc
+
+
+# --------------------------------------------------------------------------
+# PDF 内嵌位图 —— 扫描件兜底的必经之路
+# --------------------------------------------------------------------------
+
+# pypdf 的 ``page.images`` 需要 Pillow，本项目不引入新依赖，所以直接读 XObject。
+_JPEG_FILTER = "/DCTDecode"
+_SKIP_FILTERS = ("/JBIG2Decode",)
+_MAX_XOBJECT_DEPTH = 4
+
+
+def extract_embedded_images(path: str | Path) -> list[tuple[bytes, str]]:
+    """抽出 PDF 页面里的内嵌位图，返回 ``[(字节, 扩展名)]``，按页序排列。
+
+    扫描件 PDF 的形态就是"每页一张图、文字层为空"，这时唯一的出路是把那张图
+    抠出来交给视觉模型。**不能把整个 PDF 当图片发出去**：``mime_of()`` 对
+    ``.pdf`` 会回落成 ``image/png``，等于把 PDF 文件流贴上 PNG 的标签发给模型，
+    不报错，只是永远识别不出来。
+
+    两种处理方式：
+
+    - ``DCTDecode``（JPEG，扫描件最常见）：字节原样透传 —— pypdf 对图像滤镜
+      不解码，取出来的就是 JPEG 本身。
+    - 其余位图：pypdf 能解码成原始样本的（Flate / LZW / RunLength / CCITT），
+      若是 8 位灰度或 RGB，就用 zlib 自己封成 PNG。CMYK、索引色、1/2/4 位
+      这些不转换 —— 宁可少一条路，也不发一张颜色错乱的图出去。
+    """
+    from pypdf import PdfReader
+
+    p = Path(path)
+    try:
+        reader = PdfReader(str(p))
+    except Exception as exc:  # noqa: BLE001 —— pypdf 的解析异常类型很杂
+        raise ExtractionError(f"PDF 无法解析：{type(exc).__name__}: {exc}") from exc
+
+    found: list[tuple[bytes, str]] = []
+    for page in reader.pages:
+        _collect_page_images(page.get("/Resources"), found, depth=0)
+    return found
+
+
+def _collect_page_images(resources: Any, out: list[tuple[bytes, str]], depth: int) -> None:
+    """遍历资源字典里的 XObject；表单 XObject 会再往里钻一层。"""
+    if resources is None or depth > _MAX_XOBJECT_DEPTH:
+        return
+    xobjects = resources.get("/XObject")
+    if xobjects is None:
+        return
+    for obj in xobjects.values():
+        obj = obj.get_object()
+        subtype = obj.get("/Subtype")
+        if subtype == "/Image":
+            converted = _image_bytes(obj)
+            if converted is not None:
+                out.append(converted)
+        elif subtype == "/Form":
+            _collect_page_images(obj.get("/Resources"), out, depth + 1)
+
+
+def _image_bytes(obj: Any) -> tuple[bytes, str] | None:
+    """把一个图像 XObject 转成 ``(字节, 扩展名)``；做不到就返回 None。"""
+    filters = obj.get("/Filter") or []
+    if isinstance(filters, str):
+        filters = [filters]
+    filters = [str(f) for f in filters]
+
+    if filters and filters[-1] == _JPEG_FILTER:
+        # JPEG 原样透传：pypdf 的 DCTDecode 是恒等解码，取出来就是 JPEG 字节流。
+        return bytes(obj.get_data()), ".jpg"
+
+    if any(f in _SKIP_FILTERS for f in filters):
+        return None
+
+    width = obj.get("/Width")
+    height = obj.get("/Height")
+    bits = obj.get("/BitsPerComponent", 8)
+    color_space = obj.get("/ColorSpace")
+    if not width or not height or int(bits) != 8:
+        return None
+    channels = {"/DeviceGray": 1, "/DeviceRGB": 3}.get(str(color_space))
+    if channels is None:
+        return None
+
+    try:
+        samples = bytes(obj.get_data())
+    except Exception:  # noqa: BLE001 —— 解码失败只意味着这张图用不了
+        return None
+    if len(samples) < int(width) * int(height) * channels:
+        return None
+    return _png_from_samples(samples, int(width), int(height), channels), ".png"
+
+
+def _png_from_samples(samples: bytes, width: int, height: int, channels: int) -> bytes:
+    """把裸像素样本封成最小 PNG（每行 filter type 0）。纯标准库，无第三方依赖。"""
+    stride = width * channels
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        raw += samples[y * stride : (y + 1) * stride]
+
+    def chunk(tag: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(tag + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + tag + payload + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2 if channels == 3 else 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw)))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _loads_lenient(raw: str) -> dict[str, Any] | None:
