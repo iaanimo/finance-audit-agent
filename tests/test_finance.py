@@ -828,10 +828,12 @@ def test_voucher_is_balanced(policy):
 
 
 def test_r013_is_not_tautological(policy):
-    """R013 必须是一条**真校验**，不是恒真式。
+    """R013 这个 checker 本身不是恒真式：给它一张不平衡的凭证，它判 FAIL。
 
-    这条测试守的是"规则有没有意义"：如果凭证生成逻辑改了、借贷又变成写死的相等，
-    这里会红。一个永远通过的校验规则，比没有规则更糟 —— 它假装在把关。
+    ⚠️ 这条只证明**函数写得对**，不证明**规则在本项目里真的会触发** ——
+    这里的凭证是手工造的，而系统自己生成不出不平衡的凭证（这正是当年那条
+    "R013 恒真"的问题所在）。要证后者，看
+    :func:`test_r013_catches_an_invoice_that_does_not_add_up`。
     """
     inv = make_invoice()          # amount=1556.60  tax_amount=93.40  total=1650.00
     req = make_request()
@@ -855,6 +857,87 @@ def test_r013_is_not_tautological(policy):
     f = finding_of(findings, "R013")
     assert f.severity is Severity.FAIL, "借贷被人为改错，R013 必须判 FAIL"
     assert f.evidence["debit_total"] != f.evidence["credit_total"]
+
+
+def test_r013_catches_an_invoice_that_does_not_add_up(policy):
+    """票面自相矛盾（不含税金额 + 税额 ≠ 价税合计）必须被 R013 抓住。
+
+    这是上一条的**加强版**，差别很实在：上一条用手工造的凭证反证 checker 会 FAIL，
+    但它证明的是"这个函数写得对"，不是"这条规则在本项目里真的会触发" ——
+    系统永远生成不出那种凭证。
+
+    这一条走**系统的真实路径**：票面数字自相矛盾 -> build_voucher 忠实照抄票面
+    -> 借贷自然不平 -> R013 FAIL。
+
+    守的是这个：如果哪天有人给拆分逻辑加一句「拆出来合不上就退回单行写法」，
+    借贷又变成写死的相等，这条会立刻红。加那句话的初衷是"别因为拆不开就出不了凭证"，
+    但那等于把「票面自己都对不上」这件事实**悄悄抹掉** —— 财务上不能这么干。
+    """
+    # 1000.00 + 60.00 = 1060.00，票面却写 1200.00
+    inv = make_invoice(
+        amount="1000.00", tax_amount="60.00", total="1200.00",
+        total_in_words="壹仟贰佰圆整",
+    )
+    req = make_request(amount="1200.00")
+
+    v = build_voucher(inv, req, policy)
+    assert not v.balanced, "票面 1000.00 + 60.00 ≠ 1,200.00，凭证不该是平衡的"
+    assert v.debit_total == parse_money("1060.00")
+    assert v.credit_total == parse_money("1200.00")
+
+    findings = evaluate(inv, req, policy, history=MemoryHistoryView(), voucher=v)
+    f = finding_of(findings, "R013")
+    assert f.severity is Severity.FAIL
+    assert f.evidence["debit_total"] != f.evidence["credit_total"]
+
+
+def test_voucher_balance_is_exact_not_tolerant(policy):
+    """借贷平衡是**绝对等式**，不是「差一分也算平」。
+
+    1 分容差是为「人均」「每晚」这类**除法派生值**准备的（制度 4.2/4.3），
+    借贷平衡用不上它 —— 会计上不存在差了 1 分还叫平衡的凭证。
+    """
+    inv = make_invoice(amount="1556.60", tax_amount="93.39", total="1650.00")
+    v = build_voucher(inv, make_request(), policy)
+    assert v.debit_total == parse_money("1649.99")
+    assert v.credit_total == parse_money("1650.00")
+    assert not v.balanced, "差 1 分也是不平衡"
+
+    f = finding_of(
+        evaluate(inv, make_request(), policy, history=MemoryHistoryView(), voucher=v),
+        "R013",
+    )
+    assert f.severity is Severity.FAIL
+
+
+def test_amount_consistency_is_exact_not_tolerant(policy):
+    """R010：制度 3.5 写的是「**完全一致**」，就不该有容差。
+
+    1 分的差异在过去会被放行（money_eq 的 1 分容差），但财务上「申请 1650.01、
+    票面 1650.00」就是不一致，必须退回更正。容差在这里不是宽容，是把制度放宽了。
+    """
+    inv = make_invoice()                      # 价税合计 1650.00
+    f = finding_of(
+        evaluate(inv, make_request(amount="1650.01"), policy, history=MemoryHistoryView()),
+        "R010",
+    )
+    assert f.severity is Severity.FAIL, "差 1 分也是不一致"
+    # 结论文字必须说真话：不能写着"均为 1,650.00"却把 1650.01 放过去
+    assert "1,650.01" in f.message and "1,650.00" in f.message
+
+
+def test_words_consistency_is_exact_not_tolerant(policy):
+    """R016：制度 3.7 说大小写不符是「票面被篡改的典型特征」。
+
+    而"只改小写、不改大写"改的往往就是那 1 分 —— 带容差的比较恰好放过它。
+    """
+    # 大写仍是「壹仟陆佰伍拾圆整」(1650.00)，小写被改成 1650.01
+    inv = make_invoice(total="1650.01")
+    f = finding_of(
+        evaluate(inv, make_request(amount="1650.01"), policy, history=MemoryHistoryView()),
+        "R016",
+    )
+    assert f.severity is Severity.FAIL
 
 
 def test_voucher_falls_back_to_single_line_without_tax(policy):

@@ -394,7 +394,14 @@ class Voucher(BaseModel):
 
     @property
     def balanced(self) -> bool:
-        return money_eq(self.debit_total, self.credit_total)
+        """借贷是否平衡 —— **精确相等，不带容差**。
+
+        「有借必有贷、借贷必相等」是借贷记账法里的绝对等式，会计上不存在
+        "差一分也算平"的凭证。``money_eq`` 的 1 分容差是给「人均」「每晚」
+        这类**除法派生值**准备的（制度 4.2、4.3），用在这里会把
+        「票面不含税金额 + 税额 ≠ 价税合计」这种自相矛盾悄悄抹平。
+        """
+        return self.debit_total == self.credit_total
 
 
 class AuditResult(BaseModel):

@@ -23,11 +23,15 @@ if not exist "logs" mkdir logs
 
 echo   审核台: http://127.0.0.1:8000/audit
 echo.
-echo   提示：演示前请先在页面上点「清空演示数据」，
-echo         否则排练跑过的单子会触发"重复报销"，开场基线会翻车。
+echo   本脚本以【演示模式】启动（--demo），页面上会出现「清空演示数据」按钮。
+echo   提示：演示前请先点它一次，否则排练跑过的单子会触发"重复报销"，
+echo         开场基线会翻车。
+echo.
+echo   注意：那个按钮会物理删除审核单与审计轨迹。会计凭证依法最低保管 30 年，
+echo         真实部署请直接运行 server.py（不加 --demo），按钮不会出现。
 echo.
 echo   按 Ctrl+C 停止服务。
 echo.
 
-".venv\Scripts\python.exe" server.py
+".venv\Scripts\python.exe" server.py --demo
 pause

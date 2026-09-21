@@ -230,3 +230,42 @@ def test_blank_form_via_http_lists_the_missing_fields(client, temp_data_dir):
     detail = resp.json()["detail"]
     assert "申请人" in detail and "费用类型" in detail
     assert not (temp_data_dir / "uploads").exists()
+
+
+# ---------------------------------------------------------------------------
+# 「清空演示数据」默认关闭 —— 这是法定义务，不是产品定位选择
+# ---------------------------------------------------------------------------
+
+
+def test_reset_is_disabled_by_default(client):
+    """默认启动时，删除会计档案的接口必须是 403。
+
+    依据：《会计档案管理办法》（财政部、国家档案局令第 79 号）第十四条、第十五条
+    及附表 —— 原始凭证、记账凭证的最低保管期限为 30 年；本项目制度 6.2 也写着
+    「留痕记录只追加，不得修改或删除」。
+
+    真实系统里正确的更正方式是**红冲**（生成反向凭证），不是删除。
+    这条测试守的是"别哪天为了演示方便，把这个口子又默认打开"。
+    """
+    assert server.DEMO_MODE is False, "测试进程必须是默认（非演示）状态"
+
+    resp = client.post("/api/audit/reset")
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert "不得删除" in detail
+    assert "30 年" in detail          # 把法律依据写在报错里，而不是只说"没权限"
+    assert "红冲" in detail
+
+
+def test_reset_opens_only_in_demo_mode(client, monkeypatch):
+    """显式开演示模式时才放行 —— 演示流程不受影响（start.bat 会带 --demo）。"""
+    monkeypatch.setattr(server, "DEMO_MODE", True)
+    resp = client.post("/api/audit/reset")
+    assert resp.status_code == 200
+
+
+def test_health_reports_demo_mode(client, monkeypatch):
+    """页面靠这个字段决定显不显示清空按钮，别让它失联。"""
+    assert client.get("/api/health").json()["demo_mode"] is False
+    monkeypatch.setattr(server, "DEMO_MODE", True)
+    assert client.get("/api/health").json()["demo_mode"] is True

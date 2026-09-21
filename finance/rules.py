@@ -38,7 +38,6 @@ from .models import (
     Severity,
     SuggestedStatus,
     Voucher,
-    money_eq,
     money_le,
     money_str,
     parse_chinese_amount,
@@ -427,7 +426,11 @@ def check_amount_match(ctx: RuleContext) -> CheckOutcome:
     }
     if total is None:
         return _fail("发票价税合计缺失，无法核对金额", **ev)
-    if not money_eq(claimed, total):
+    # **精确比较，不带容差。** 制度 3.5 写的是「必须与发票价税合计**完全一致**」，
+    # 会计上还要求账证相符。「申请 1650.01、票面 1650.00」就是不一致，该退回更正。
+    # money_eq 的 1 分容差是给「人均」「每晚」这类除法派生值用的，
+    # 用在这里不是宽容，是把制度悄悄放宽了一分钱。
+    if claimed != total:
         return _fail(
             f"申请金额 {money_str(claimed)} 元与发票价税合计 {money_str(total)} 元不一致",
             **ev,
@@ -681,7 +684,9 @@ def check_amount_in_words(ctx: RuleContext) -> CheckOutcome:
         )
 
     ev["parsed_in_words"] = float(parsed)
-    if not money_eq(parsed, total):
+    # **精确比较，不带容差。** 制度 3.7 说大小写不符是「票面被篡改的典型特征」，
+    # 而"只改小写、不改大写"改的往往就是那 1 分 —— 带容差的比较恰好放过它。
+    if parsed != total:
         return _fail(
             f"价税合计大小写不一致：大写「{words}」= {money_str(parsed)} 元，"
             f"小写 = {money_str(total)} 元。疑似票面被篡改。",
