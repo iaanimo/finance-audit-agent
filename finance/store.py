@@ -214,8 +214,6 @@ class StoreHistoryView:
 
     def __init__(self, store: AuditStore):
         self._store = store
-        self._approved: list[HistoryHit] | None = None
-        self._submitted: list[HistoryHit] | None = None
 
     def _to_hit(self, result: AuditResult, raw: dict) -> HistoryHit:
         issue = result.invoice.issue_date
@@ -234,28 +232,20 @@ class StoreHistoryView:
         )
 
     def _approved_hits(self) -> list[HistoryHit]:
-        if self._approved is None:
-            self._approved = [
-                self._to_hit(r, raw) for r, raw in self._store.approved_records()
-            ]
-        return self._approved
+        return [self._to_hit(r, raw) for r, raw in self._store.approved_records()]
 
     def _submitted_hits(self) -> list[HistoryHit]:
-        if self._submitted is None:
-            hits: list[HistoryHit] = []
-            for result in self._store.all_records():
-                hits.append(
-                    HistoryHit(
-                        audit_id=result.audit_id,
-                        invoice_key=result.invoice.key(),
-                        invoice_number=result.invoice.invoice_number,
-                        seller_name=result.invoice.seller_name,
-                        issue_date=result.invoice.issue_date,
-                        decided_at="",
-                    )
-                )
-            self._submitted = hits
-        return self._submitted
+        return [
+            HistoryHit(
+                audit_id=result.audit_id,
+                invoice_key=result.invoice.key(),
+                invoice_number=result.invoice.invoice_number,
+                seller_name=result.invoice.seller_name,
+                issue_date=result.invoice.issue_date,
+                decided_at="",
+            )
+            for result in self._store.all_records()
+        ]
 
     def find_invoice(self, invoice_key: str) -> HistoryHit | None:
         for hit in self._approved_hits():

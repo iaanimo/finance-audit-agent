@@ -351,6 +351,33 @@ def test_inv3d_cannot_decide_twice(tmp_path):
         decide(result, Decision.APPROVED, "李四", store=store)
 
 
+def test_history_view_sees_records_written_after_it_was_created(tmp_path):
+    """历史视图必须**每次查询重新扫盘**，不能吃缓存。
+
+    回归测试：``StoreHistoryView`` 曾把结果缓存在 ``self._approved`` /
+    ``self._submitted`` 里，而它的 docstring 写的是"每次查询都重新扫盘"——
+    代码和注释对不上。后果不是性能问题，是**漏检**：同一个视图实例先查一次
+    （空），期间有人审批通过了一张票，再查还是空，R004 查重就漏了。
+    这个项目最值钱的是"受控"这套主张，注释说了就得是真话。
+    """
+    store = AuditStore(base_dir=tmp_path)
+    result = _rejected_result(store)
+    view = store.history_view()
+
+    # 先查一次：这张票还没被批准，查重不该命中（同时把缓存填上）
+    assert view.find_invoice(result.invoice.key()) is None
+
+    # 复核人推翻系统建议、批准入账 —— 从这一刻起它才算"这张票用掉了"
+    decide(
+        result, Decision.APPROVED, "张伟", store=store,
+        override_reason="超标部分员工自付，已电话确认",
+    )
+
+    hit = view.find_invoice(result.invoice.key())
+    assert hit is not None, "视图吃到了旧缓存，新入账的单子看不见 —— R004 会漏检"
+    assert hit.audit_id == result.audit_id
+
+
 # ==========================================================================
 # 不变量 4：叙述护栏
 # ==========================================================================

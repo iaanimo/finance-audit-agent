@@ -135,7 +135,10 @@ def unverifiable_numbers(narrative: str, findings: list[AuditFinding]) -> list[s
 
 
 def _extract_numbers(text: str) -> list[str]:
-    """抓出文本里的数字 token。规则号先剔除，小整数放行交给调用方判断。"""
+    """抓出文本里的数字 token。规则号（R001）先剔除 —— 它不是"事实数字"。
+
+    这里只负责抓，不管放行与否；能不能溯源由 :func:`allowed_numbers` 决定。
+    """
     if not text:
         return []
     cleaned = _RE_RULE_ID.sub(" ", str(text))

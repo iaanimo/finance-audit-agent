@@ -292,3 +292,26 @@ def test_illegal_audit_id_on_decide_is_404(client):
         "/api/audit/!!!/decide", json={"decision": "APPROVED", "operator": "x"}
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 页面不许写死判定结论
+# ---------------------------------------------------------------------------
+
+
+def test_page_reads_balance_verdict_from_backend():
+    """凭证的「借贷平衡」必须读后端的 ``v.balanced``，不能写死。
+
+    R013 现在是真算术校验（借 = 不含税 + 进项税，贷 = 价税合计），
+    系统**真的可能产出不平衡的凭证**。页面写死「借贷平衡」的话，
+    一张不平衡的凭证在界面上照样显示绿标签 —— 那是页面在替系统撒谎。
+
+    这是静态检查（没有浏览器可跑）。它拦不住"改坏了渲染逻辑"，
+    但拦得住"改回写死"这一个具体动作。
+    """
+    html = AUDIT_HTML.read_text(encoding="utf-8")
+    assert "v.balanced" in html, "页面没有读后端的借贷平衡结论"
+    assert "借贷不平衡" in html, "页面没有不平衡时的分支"
+    assert html.count("借贷平衡") == 1, (
+        "「借贷平衡」出现了不止一次 —— 怀疑又有一处写死的标签"
+    )
