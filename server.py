@@ -178,14 +178,17 @@ async def audit_run(req: AuditRunRequest):
     if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型：{suffix}")
 
-    target = resolve_data_path(f"{UPLOAD_DIR_NAME}/{uuid.uuid4().hex[:10]}{suffix}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(blob)
-
+    # ⚠️ 顺序要紧：**先校验申请单，再落盘**。
+    # 反过来的话，一张缺字段的废单会先把文件写进 data/uploads/ 再被 400 拒掉，
+    # 留下一个没人引用的孤儿文件。
     try:
         request = _build_request(req.request)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"报销申请单字段有误：{exc}")
+
+    target = resolve_data_path(f"{UPLOAD_DIR_NAME}/{uuid.uuid4().hex[:10]}{suffix}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(blob)
 
     try:
         result = await run_audit(
@@ -276,13 +279,26 @@ async def audit_reset():
 
 
 def _build_request(spec: dict) -> ReimbursementRequest:
-    """把前端传来的 dict 转成报销申请单。缺字段给人话报错，不是 500。"""
+    """把前端传来的 dict 转成报销申请单。缺字段给人话报错，不是 500。
+
+    **必填项在这里拦死，不能只靠页面拦。** 审核台的入口是公开接口，
+    谁都能绕过表单直接 POST 一个空对象过来；放过去的话会生成一张
+    「申请人空、金额 0」的废单，真的落进查重台账。
+
+    与页面校验的分工：页面拦是为了**立刻**告诉人缺什么，
+    这里拦才是**真正**拦得住的那一道。
+    """
     from datetime import date
 
     if not spec:
         raise ValueError("缺少报销申请单数据")
 
-    submit_raw = spec.get("submit_date") or date.today().isoformat()
+    # 提交日期**不设默认值**。曾经缺省取服务器当天 —— 那等于系统替申请人
+    # 编了一个申报日期，而 R003（开票日距提交日 <= 60 天、不得跨年）正是
+    # 拿它当判定基准的。申报日期是事实，只能由申请人显式给出。
+    submit_raw = spec.get("submit_date")
+    if not submit_raw:
+        raise ValueError("提交日期未填")
     try:
         submit_date = date.fromisoformat(str(submit_raw))
     except ValueError:
@@ -293,15 +309,36 @@ def _build_request(spec: dict) -> ReimbursementRequest:
     except ValueError:
         raise ValueError(f"申请金额无法解析：{spec.get('amount')!r}")
 
+    applicant = str(spec.get("applicant") or "").strip()
+    department = str(spec.get("department") or "").strip()
+    expense_type = str(spec.get("expense_type") or "").strip()
+
+    missing = [
+        label
+        for label, value in (
+            ("申请人", applicant),
+            ("所属部门", department),
+            ("费用类型", expense_type),
+        )
+        if not value
+    ]
+    if missing:
+        raise ValueError("以下必填项为空：" + "、".join(missing))
+
+    # 金额 0 不是"小金额"，是**没填**。放过去只会得到一张
+    # R010「申请金额 0.00 ≠ 发票 X」的废单 —— 没有财务风险，但污染台账。
+    if amount <= 0:
+        raise ValueError(f"申请金额必须大于 0，收到 {amount}")
+
     nights = spec.get("nights")
     headcount = spec.get("headcount")
 
     return ReimbursementRequest(
-        applicant=str(spec.get("applicant", "")).strip(),
-        department=str(spec.get("department", "")).strip(),
-        expense_type=str(spec.get("expense_type", "")).strip(),
+        applicant=applicant,
+        department=department,
+        expense_type=expense_type,
         amount=amount,
-        reason=str(spec.get("reason", "")).strip(),
+        reason=str(spec.get("reason") or "").strip(),
         submit_date=submit_date,
         city=str(spec.get("city") or "").strip(),
         nights=int(nights) if nights not in (None, "") else None,

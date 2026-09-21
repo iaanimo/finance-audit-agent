@@ -370,9 +370,43 @@ el('fileInput').addEventListener('change', function () {
  * 财务系统的原则是让人没法顺手犯错 —— 宁可多填一次，不可带着旧值提交。
  */
 function clearRequestForm() {
-  ['applicant', 'expense_type', 'amount', 'reason', 'city', 'nights', 'headcount']
+  // 提交日期也在清空之列：预置的 2026-09-18 正是 R003（开票日距提交日 <= 60 天、
+  // 不得跨年）的判定基准，留着等于替申请人虚报了一个日期。
+  // 部门不清 —— 它只用于凭证科目映射，与票面无关，且下拉本就有默认值。
+  ['applicant', 'expense_type', 'amount', 'reason', 'city', 'nights', 'headcount',
+   'submit_date']
     .forEach(function (id) { var e = el(id); if (e) e.value = ''; });
   el('manualNotice').style.display = 'block';
+}
+
+/* 提交前必填校验 —— 防呆的另一半。
+ *
+ * 清空表单只是"不给你旧值"，不填就点提交照样能过：后端会把申请人当空串、
+ * 金额当 0，生成一张 R010「申请金额 0.00 ≠ 发票 X」的废单。废单没有财务风险
+ * （0 元不可能被放行），但会真的落进台账、污染查重基线。
+ *
+ * 真正拦得住的那一道在 server.py::_build_request（接口是公开的，能绕过页面），
+ * 这里拦是为了**立刻**告诉人缺什么，而不是等一个 400 回来。
+ */
+var REQUIRED_FIELDS = [
+  ['applicant', '申请人'],
+  ['expense_type', '费用类型'],
+  ['amount', '申请金额'],
+  ['submit_date', '提交日期']
+];
+
+function describeFormProblem() {
+  for (var i = 0; i < REQUIRED_FIELDS.length; i++) {
+    var id = REQUIRED_FIELDS[i][0], label = REQUIRED_FIELDS[i][1];
+    var raw = String(el(id).value || '').trim();
+    if (!raw) return label + '未填';
+    if (id === 'amount') {
+      // 容忍 "1,650.00"、"¥1650" 这类照票面抄下来的写法，与后端 parse_money 一致
+      var n = Number(raw.replace(/[,\s¥￥]/g, ''));
+      if (!isFinite(n) || n <= 0) return '申请金额必须是一个大于 0 的数字';
+    }
+  }
+  return '';
 }
 
 /* ---------------- 取发票字节 ---------------- */
@@ -407,6 +441,11 @@ function getInvoice() {
 
 /* ---------------- 提交审核 ---------------- */
 el('runBtn').addEventListener('click', function () {
+  var problem = describeFormProblem();
+  if (problem) {
+    toast('✕ ' + problem + '，请对照发票填好再提交');
+    return;   // 不发请求 —— 后端也会拦，但没必要先制造一张废单
+  }
   var btn = this;
   getInvoice().then(function (inv) {
     btn.disabled = true;

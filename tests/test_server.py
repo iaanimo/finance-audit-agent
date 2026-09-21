@@ -1,0 +1,232 @@
+"""提交入口的强制校验测试
+
+审核台的表单可以「清空」，但**清空 ≠ 拦得住**。
+实测过：清空后什么都不填直接点提交，请求照发，服务端把申请人当空串、
+金额按 0 处理，真生成了一张 R010「申请金额 0.00 ≠ 发票 380.00」的废单。
+
+废单没有财务风险（0 元不可能被放行），但它**真的落进了查重台账** ——
+一个宣称「让人没法顺手犯错」的系统，不该留这个口子。
+
+两道拦截各测各的：
+
+- 页面那道（``static/audit.html`` 的 ``describeFormProblem``）拦的是手滑，
+  代价是用户看不到即时反馈之前先发一次请求；
+- 服务端那道（``server.py::_build_request``）拦的是**绕过页面直接 POST**，
+  这才是拦得住的那一道。
+
+两处的必填清单必须一致 —— :func:`test_page_and_server_agree_on_required_fields`
+就是盯着这件事的。
+"""
+
+from __future__ import annotations
+
+import base64
+import re
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import server
+from finance import parse_money
+from server import _build_request
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+AUDIT_HTML = PROJECT_ROOT / "static" / "audit.html"
+
+#: 一份合法申请单，各测试按需覆写其中一项
+VALID_FORM = {
+    "applicant": "张三",
+    "department": "技术部",
+    "expense_type": "住宿费",
+    "amount": "1650.00",
+    "reason": "上海客户现场支持",
+    "submit_date": "2026-09-18",
+    "city": "上海",
+    "nights": "3",
+}
+
+#: 页面上的申请单字段（与 audit.html 的表单一致）
+FORM_FIELDS = [
+    "applicant",
+    "department",
+    "expense_type",
+    "amount",
+    "reason",
+    "submit_date",
+    "city",
+    "nights",
+    "headcount",
+]
+
+
+@pytest.fixture
+def temp_data_dir(tmp_path, monkeypatch):
+    """把 ``resolve_data_path`` 指到临时目录，测试绝不写进真实 data/。"""
+    root = tmp_path
+
+    class _FakeSettings:
+        def __init__(self) -> None:
+            self.project_root = root
+            self.data_dir = root / "data"
+
+    monkeypatch.setattr("tools.file_ops.get_settings", lambda: _FakeSettings())
+    return root / "data"
+
+
+@pytest.fixture
+def client(temp_data_dir):
+    return TestClient(server.app)
+
+
+def _server_rejects_blank(field: str) -> bool:
+    """把某个字段置空，看服务端是否拒绝。"""
+    spec = dict(VALID_FORM)
+    spec[field] = ""
+    try:
+        _build_request(spec)
+    except (KeyError, ValueError):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# 必填项
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field, label",
+    [
+        ("applicant", "申请人"),
+        ("department", "所属部门"),
+        ("expense_type", "费用类型"),
+    ],
+)
+def test_blank_text_field_is_rejected(field, label):
+    """全空格也算空 —— ``strip()`` 之后才判断。"""
+    spec = dict(VALID_FORM, **{field: "   "})
+    with pytest.raises(ValueError) as exc:
+        _build_request(spec)
+    assert label in str(exc.value)
+
+
+def test_all_blank_fields_are_listed_at_once():
+    """一次报全，别让人填一个报一个。"""
+    with pytest.raises(ValueError) as exc:
+        _build_request({"submit_date": "2026-09-18", "amount": "1", "nights": ""})
+    msg = str(exc.value)
+    assert "申请人" in msg and "所属部门" in msg and "费用类型" in msg
+
+
+def test_json_null_is_not_the_string_none():
+    """前端传 ``null`` 时，``str(None)`` 会变成字面量 ``"None"`` —— 那是个坑。"""
+    with pytest.raises(ValueError):
+        _build_request(dict(VALID_FORM, applicant=None))
+
+
+@pytest.mark.parametrize("amount", ["0", "0.00", "", None, "-1.00"])
+def test_non_positive_amount_is_rejected(amount):
+    """金额 0 不是「小金额」，是**没填** —— 放过去只会得到一张废单。"""
+    with pytest.raises(ValueError) as exc:
+        _build_request(dict(VALID_FORM, amount=amount))
+    assert "金额" in str(exc.value)
+
+
+def test_amount_noise_is_tolerated():
+    """照票面抄下来的 ``1,650.00`` / ``¥1650`` 也算合法输入。"""
+    for raw in ("1,650.00", "¥1650", " 1650 元"):
+        assert _build_request(dict(VALID_FORM, amount=raw)).amount == parse_money(raw)
+
+
+def test_submit_date_is_required_not_defaulted():
+    """提交日期没有默认值。
+
+    曾经缺省取服务器当天 —— 那等于系统替申请人编了一个申报日期，
+    而 R003（开票日距提交日 <= 60 天、不得跨年）正是拿它当判定基准的。
+    """
+    with pytest.raises(ValueError) as exc:
+        _build_request(dict(VALID_FORM, submit_date=""))
+    assert "提交日期" in str(exc.value)
+
+
+def test_malformed_submit_date_is_rejected():
+    with pytest.raises(ValueError) as exc:
+        _build_request(dict(VALID_FORM, submit_date="2026/09/18"))
+    assert "YYYY-MM-DD" in str(exc.value)
+
+
+def test_valid_form_still_builds():
+    """拦得住的另一面：合法申请单必须照常通过，别把拦截面做宽了。"""
+    req = _build_request(dict(VALID_FORM))
+    assert req.applicant == "张三"
+    assert req.department == "技术部"
+    assert req.expense_type == "住宿费"
+    assert req.amount == parse_money("1650.00")
+    assert req.nights == 3
+    assert req.headcount is None          # 未填就是 None，不是 0
+
+
+# ---------------------------------------------------------------------------
+# 两处必填清单必须一致（页面 ↔ 服务端）
+# ---------------------------------------------------------------------------
+
+
+def _page_required_field_ids() -> list[str]:
+    block = re.search(r"var REQUIRED_FIELDS = \[(.*?)\];", AUDIT_HTML.read_text(encoding="utf-8"), re.S)
+    assert block, "static/audit.html 里找不到 REQUIRED_FIELDS 清单"
+    return re.findall(r"\['([a-z_]+)'", block.group(1))
+
+
+def test_page_and_server_agree_on_required_fields():
+    """页面必填清单 ↔ 服务端必填校验，两处必须一致。
+
+    只改一边的后果很具体：
+    页面不拦、服务端拦 → 用户看到的是迟到的 400；
+    页面拦、服务端不拦 → 直接 POST 就能生成废单。
+    所以新增一个必填项时，两边都得改 —— 这个测试就是盯着这件事的。
+    """
+    page_required = set(_page_required_field_ids())
+    server_required = {f for f in FORM_FIELDS if _server_rejects_blank(f)}
+
+    # 部门是例外：页面上它是个下拉框，产不出空值，所以不必进页面清单。
+    assert page_required | {"department"} == server_required
+
+
+# ---------------------------------------------------------------------------
+# 端到端：空表单必须 400，且一个字节都不落盘
+# ---------------------------------------------------------------------------
+
+
+def test_blank_form_is_rejected_before_writing_anything(client, temp_data_dir):
+    """校验必须发生在落盘**之前**。
+
+    反过来写的话，一张缺字段的废单会先把文件写进 data/uploads/ 再被 400 拒掉，
+    留下一个没人引用的孤儿文件。
+    """
+    resp = client.post(
+        "/api/audit/run",
+        json={
+            "filename": "x.pdf",
+            "content_b64": base64.b64encode(b"%PDF-1.4\n%%EOF").decode(),
+            "request": {},
+        },
+    )
+    assert resp.status_code == 400
+    assert "报销申请单" in resp.json()["detail"]
+    assert not (temp_data_dir / "uploads").exists(), "被拒的请求不该留下任何文件"
+
+
+def test_blank_form_via_http_lists_the_missing_fields(client, temp_data_dir):
+    resp = client.post(
+        "/api/audit/run",
+        json={
+            "filename": "x.pdf",
+            "content_b64": base64.b64encode(b"%PDF-1.4\n%%EOF").decode(),
+            "request": {"submit_date": "2026-09-18"},
+        },
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "申请人" in detail and "费用类型" in detail
+    assert not (temp_data_dir / "uploads").exists()
