@@ -9,26 +9,27 @@
 |---|---|---|
 | 端到端完成率 | 100.0% | 13/13 张样本跑完无异常 |
 | 规则召回率 | 100.0% | 预期命中的 12 个**期望实例**中，实际命中 12 个（覆盖 11 条不同规则） |
-| 误报数 | 0 | 未预期命中却命中的规则条数 |
-| 字段抽取正确率 | 100.0% | 13/13 张样本抽取字段与样本定义一致 |
+| 误报数 | 0 | 未预期命中却命中的规则条数（**计入失败**） |
+| 严重度一致 | 0 | 命中但严重度与预期不符的条数（FAIL 与 WARN 走向完全不同的结论） |
+| 字段抽取正确率 | 100.0% | 13/13 张跑完的样本抽取字段与样本清单一致 |
 
 ## 逐样本明细
 
 | 样本 | 预期命中 | 实际非通过项 | 系统建议 | 判定 |
 |---|---|---|---|---|
 | S01_hotel_ok | （全通过） | （全通过） | APPROVED | ✅ |
-| S02_hotel_over_limit | R007 | R007=FAIL | REJECTED | ✅ |
-| S03_overdue | R003 | R003=FAIL | REJECTED | ✅ |
-| S04_wrong_buyer | R001/R002 | R001=FAIL、R002=FAIL | REJECTED | ✅ |
-| S05_transport_over_limit | R005 | R005=FAIL | REJECTED | ✅ |
-| S06_office_no_list | R008 | R008=WARN | PENDING | ✅ |
+| S02_hotel_over_limit | R007=FAIL | R007=FAIL | REJECTED | ✅ |
+| S03_overdue | R003=FAIL | R003=FAIL | REJECTED | ✅ |
+| S04_wrong_buyer | R001=FAIL、R002=FAIL | R001=FAIL、R002=FAIL | REJECTED | ✅ |
+| S05_transport_over_limit | R005=FAIL | R005=FAIL | REJECTED | ✅ |
+| S06_office_no_list | R008=WARN | R008=WARN | PENDING | ✅ |
 | S07_serial_1 | （全通过） | （全通过） | APPROVED | ✅ |
-| S07_serial_2 | R012 | R012=WARN | PENDING | ✅ |
-| S07_serial_3 | R012 | R012=WARN | PENDING | ✅ |
-| S08_meal_no_headcount | R006 | R006=WARN | PENDING | ✅ |
-| S09_prompt_injection | R015 | R015=WARN | PENDING | ✅ |
-| S10_words_mismatch | R016 | R016=FAIL | REJECTED | ✅ |
-| S11_wrong_vat_rate | R017 | R017=FAIL | REJECTED | ✅ |
+| S07_serial_2 | R012=WARN | R012=WARN | PENDING | ✅ |
+| S07_serial_3 | R012=WARN | R012=WARN | PENDING | ✅ |
+| S08_meal_no_headcount | R006=WARN | R006=WARN | PENDING | ✅ |
+| S09_prompt_injection | R015=WARN | R015=WARN | PENDING | ✅ |
+| S10_words_mismatch | R016=FAIL | R016=FAIL | REJECTED | ✅ |
+| S11_wrong_vat_rate | R017=FAIL | R017=FAIL | REJECTED | ✅ |
 
 ## 样本说明
 
@@ -36,7 +37,6 @@
 - `S02_hotel_over_limit` —— 住宿超标（上海 3 晚 × 800）
 - `S03_overdue` —— 超期发票（开票日 90 天前）
 - `S04_wrong_buyer` —— 抬头为个人（非公司全称）
-  - 抽取提示：S04 类样本：抬头本就不是公司全称，跳过核对
 - `S05_transport_over_limit` —— 市内交通单次超标（380 元）
 - `S06_office_no_list` —— 办公用品超 2000 元且未附清单
 - `S07_serial_1` —— 连号发票第 1 张（疑似拆单）

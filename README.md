@@ -242,6 +242,11 @@ PDF 文本层路径完全不联网、可复现，在本项目的样本版式上�
 所以保留了视觉模型兜底（`use_vision=True`），并让规则引擎对「抽不到的字段」
 统一判 WARN 转人工，而不是猜。
 
+扫描件的 PDF 会先抠出页面**内嵌的位图**再送给模型：DCTDecode（JPEG）原样透传，
+8 位灰度/RGB 的用 zlib 重新封成 PNG；抠不到位图就明确报错让用户改传图片。
+——不这么做的话，整个 PDF 会被贴上 `image/png` 的标签发出去（`mime_of()` 对
+不认识的扩展名就是这个回落值），不报错，只是永远识别不出来。
+
 ### 申请单为什么要清空，又为什么要拦
 
 演示样本会把表单预填成「张三 / 1650.00 / 上海 / 3 晚」。手动上传自己的发票时，
@@ -373,13 +378,18 @@ finance/                     核心领域包
   voucher.py                 记账凭证草稿
   policies/                  制度 md + 规则表 + 科目表 + 预算表
 
-config/ core/ tools/         配置、叙事模型入口、文件路径约束
+config/                      配置（环境变量 -> Settings）
+core/                        叙事模型入口
+tools/
+  vision.py                  视觉模型客户端（qwen-vl-max）
+  file_ops.py                文件路径约束（不让越权路径落盘）
 scripts/
-  make_samples.py            合成发票生成器
+  make_samples.py            合成发票生成器（--manifest-only 可只重写清单，不需要 Edge）
   run_eval.py                评测集
 static/audit.html            审核台页面
-tests/test_finance.py        64 条测试（含四条不变量与 R013 非恒真校验）
-tests/test_server.py         17 条测试（提交入口的必填校验 + 两处清单一致性）
+tests/test_finance.py        91 条测试（含四条不变量与 R013 非恒真校验）
+tests/test_server.py         24 条测试（提交入口的必填校验 + 页面/服务端清单一致性 + 404）
+tests/test_eval_script.py    14 条测试（盯着评测脚本自己：严重度、误报、抽取核对）
 ```
 
 ---

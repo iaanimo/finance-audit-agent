@@ -1,0 +1,45 @@
+name: tests
+
+# README 在讲"受控"这套主张时给出的证据是测试通过数。别人只能信你，
+# 除非这里真的跑一遍 —— 所以这个文件的作用是：让那句话可以被验证。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 单元测试（含四条不变量）
+        # PYTHONIOENCODING：报告里有 ✅ 这类字符，Windows runner 默认 GBK 会炸
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m pytest -q
+
+      - name: 离线评测（13 张样本，退出码即结论）
+        # 这一步**不需要** Edge：样本 PDF 已随仓库提交，评测只读它们。
+        # 误报、严重度不符、抽取不符都会让它返回非 0。
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python scripts/run_eval.py
