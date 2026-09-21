@@ -195,7 +195,8 @@
   <h1>财务报销审核台</h1>
   <span class="tag">受控 AGENT</span>
   <div class="links">
-    <button class="linkbtn" id="resetBtn" title="仅演示环境使用。真实系统里会计凭证与审计轨迹依法至少保存 30 年，只能红冲、不能删除。">清空演示数据（仅演示环境）</button>
+    <button class="linkbtn" id="resetBtn" style="display:none"
+            title="仅演示模式可用。会计凭证与审计轨迹依法最低保管 30 年，真实系统里只能红冲、不能删除。">清空演示数据（仅演示模式）</button>
     <a href="/docs" target="_blank">接口文档 →</a>
   </div>
 </header>
@@ -718,22 +719,34 @@ function openAudit(id) {
 el('resetBtn').addEventListener('click', function () {
   if (!confirm('清空全部审核单与审计轨迹？\n\n' +
       '演示前必须做这一步，否则排练跑过的单子\n会让正式演示的第一张样本触发"重复报销"。\n\n' +
-      '注意：这是【物理删除】，仅限演示环境。\n' +
-      '真实系统里会计凭证与审计轨迹依法至少保存 30 年，\n只能红冲、不能删除。')) return;
-  fetch('/api/audit/reset', { method: 'POST' }).then(function (r) { return r.json(); })
-    .then(function (d) {
-      toast('已清空 ' + d.removed + ' 个文件');
-      loadAuditList();
-      currentAudit = null;
-      el('resultCol').innerHTML = '<div class="card"><div class="empty">' +
-        '<div class="big">🧾</div>已重置，可以开始演示</div></div>';
+      '注意：这是【物理删除】，只在演示模式（--demo）下可用。\n' +
+      '会计凭证与审计轨迹依法最低保管 30 年\n（《会计档案管理办法》第十四条、第十五条及附表），\n' +
+      '真实系统里正确的更正方式是红冲，不是删除。')) return;
+  fetch('/api/audit/reset', { method: 'POST' }).then(function (r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error(d.detail || '清空失败');
+      return d;
     });
+  }).then(function (d) {
+    toast('已清空 ' + d.removed + ' 个文件');
+    loadAuditList();
+    currentAudit = null;
+    el('resultCol').innerHTML = '<div class="card"><div class="empty">' +
+      '<div class="big">🧾</div>已重置，可以开始演示</div></div>';
+  }).catch(function (e) {
+    toast('✕ ' + e.message);
+  });
 });
 
 /* ---------------- 启动 ---------------- */
 window.addEventListener('load', function () {
   loadSamples();
   loadAuditList();
+  // 清空按钮只在**演示模式**下才显示 —— 服务端默认关闭该接口（法定保管义务），
+  // 页面跟着走，免得留一个点了必然失败的按钮。
+  fetch('/api/health').then(function (r) { return r.json(); }).then(function (d) {
+    if (d && d.demo_mode) el('resetBtn').style.display = '';
+  }).catch(function () { /* 健康检查失败不影响审核台本身 */ });
 });
 </script>
 </body>

@@ -15,7 +15,6 @@ from .models import (
     ReimbursementRequest,
     Voucher,
     VoucherLine,
-    money_eq,
     money_str,
     parse_money,
 )
@@ -61,18 +60,27 @@ def build_voucher(
 ) -> Voucher:
     """生成一张记账凭证草稿。
 
-    **借方拆成两行（不含税金额 + 进项税额）**，而不是一行总额。
-
-    为什么值得多写这几行：如果借方只写一行总额、且金额永远等于贷方，
-    那么 R013「借贷平衡」就成了一条**恒真式** —— 校验永远通过，等于没校验。
-    真实凭证本来就是拆的：
+    **借方拆成两行（不含税金额 + 进项税额）**，只要票面写了这三项就照票面拆：
 
         借  管理费用-差旅费-住宿费      1,556.60    ← 不含税
         借  应交税费-应交增值税-进项税额    93.40    ← 税额
         贷  其他应付款-员工报销          1,650.00
 
-    这样一来借贷平衡才是一条**真的算术校验**（1556.60 + 93.40 == 1650.00）。
-    票面缺不含税金额或税额时，退回单行写法，不影响主流程。
+    **为什么必须拆开 —— 这是 R013 能不能成立的前提。**
+
+    如果借方永远只写一行总额、而这个总额又正是贷方那个数，那么「借贷平衡」
+    就是一条**恒真式**：无论票面写成什么样都通过，等于没校验。
+
+    拆开之后，借方合计是 `不含税 + 税额` **加出来的**，贷方是票面价税合计 ——
+    两者是否相等，取决于**票面自己自不自洽**，不再取决于这段代码怎么写。
+
+    所以这里**刻意不做「合不上就退回单行」的兜底**。不含税金额加税额对不上
+    价税合计，本身就是票面有问题（增值税发票上这三者本就必须严丝合缝）；
+    凭证如实照抄，由 R013 判 FAIL 报出来。加兜底把它抹平，等于替票面圆谎 ——
+    而"票面自相矛盾"恰恰是最该被抓住的那类问题。
+
+    票面缺「不含税金额」或「税额」时退回单行写法：信息不足以判断，
+    此时借贷相等是个**事实**，不是恒真式。
 
     :raises VoucherError: 科目无法归类，或金额缺失/为零
     """
@@ -92,12 +100,14 @@ def build_voucher(
     net = invoice.amount
     tax = invoice.tax_amount
     tax_account = policy.input_tax_account
+    # 三项都在才拆。**不校验 net + tax == total** —— 那是 R013 的活。
+    # 这里多写一句"合不上就退回单行"，R013 就永远看不到不合的情况了。
     if (
         net is not None
         and tax is not None
+        and invoice.total is not None
         and tax_account
         and parse_money(tax) > 0
-        and money_eq(parse_money(net) + parse_money(tax), amount)   # 拆出来必须合得上
     ):
         lines = [
             VoucherLine(direction="借", account=debit_account, amount=parse_money(net)),

@@ -58,6 +58,17 @@ app = FastAPI(title="财务报销审核受控 Agent", docs_url="/docs")
 AUDIT_STORE = AuditStore()
 SAMPLE_DIR = HERE / "finance" / "samples"
 UPLOAD_DIR_NAME = "uploads"
+
+#: 演示模式。**只有显式 `--demo` 启动时才为 True**，唯一作用是开放「清空演示数据」。
+#:
+#: 为什么默认关：删除会计凭证与审计轨迹在真实系统里是**违法**的 ——
+#: 《会计档案管理办法》（财政部、国家档案局令第 79 号）第十四条、第十五条及附表
+#: 规定「原始凭证、记账凭证」的最低保管期限为 30 年，且第十五条明确附表所列为
+#: **最低**期限。本项目自己的制度 6.2 也写着「留痕记录只追加，不得修改或删除」。
+#: 真实系统里正确的更正方式是**红冲**（生成一张反向凭证），不是删除。
+#:
+#: 所以这不是"产品定位选择"，是法定义务 —— 默认必须关，演示时才临时开。
+DEMO_MODE = False
 _MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 _ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
@@ -106,7 +117,8 @@ async def audit_page():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    """健康检查。顺带告诉页面当前是不是演示模式 —— 页面据此决定显不显示清空按钮。"""
+    return {"status": "ok", "demo_mode": DEMO_MODE}
 
 
 # ---------------------------------------------------------------------------
@@ -257,12 +269,27 @@ async def audit_decide(audit_id: str, req: AuditDecideRequest):
 
 @app.post("/api/audit/reset")
 async def audit_reset():
-    """清空演示数据。
+    """清空演示数据 —— **仅演示模式可用**。
 
-    ⚠️ **演示前必须调用一次。** 排练时跑过的单子会留在查重台账里，
+    ⚠️ 演示前必须调用一次。排练时跑过的单子会留在查重台账里，
     正式演示再传同一张 S01，R004 会命中"重复报销"，开场全绿基线当场翻车。
     这是本项目最容易踩的一个演示坑，页面上有对应按钮。
+
+    **但默认是关的。** 删除会计凭证与审计轨迹在真实系统里违法（见 ``DEMO_MODE``
+    的说明）。要演示就加 ``--demo`` 启动，`start.bat` 已经带上了。
     """
+    if not DEMO_MODE:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "「清空演示数据」已停用：会计凭证与审计轨迹不得删除。"
+                "《会计档案管理办法》（财政部、国家档案局令第 79 号）第十四条、"
+                "第十五条及附表规定，原始凭证、记账凭证的最低保管期限为 30 年；"
+                "本项目的制度 6.2 也写明「留痕记录只追加，不得修改或删除」。"
+                "真实系统里正确的更正方式是红冲（生成反向凭证），不是删除。"
+                "仅演示时，用 --demo 参数启动可临时开放本接口。"
+            ),
+        )
     removed = AUDIT_STORE.clear()
     upload_dir = resolve_data_path(UPLOAD_DIR_NAME)
     if upload_dir.is_dir():
@@ -351,12 +378,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="财务报销审核受控 Agent")
     parser.add_argument("--host", default="127.0.0.1", help="绑定地址（0.0.0.0 可局域网访问）")
     parser.add_argument("--port", type=int, default=8000, help="端口")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="演示模式：开放「清空演示数据」。**真实部署不要加** —— "
+             "删除会计凭证与审计轨迹违反《会计档案管理办法》的 30 年最低保管要求。",
+    )
     args = parser.parse_args()
+
+    global DEMO_MODE
+    DEMO_MODE = args.demo
 
     import uvicorn
 
     settings = get_settings()
     logger.info("审核台: http://%s:%s/audit", args.host, args.port)
+    if DEMO_MODE:
+        logger.warning(
+            "已开启演示模式 —— 「清空演示数据」可用，它会物理删除审核单与审计轨迹。"
+            "真实部署请去掉 --demo。"
+        )
     if not settings.api_key:
         logger.warning(
             "未配置 API Key —— 审核功能不受影响，审核意见会退化为模板文字。"
