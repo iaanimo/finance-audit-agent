@@ -397,7 +397,7 @@ tests/test_eval_script.py    14 条测试（盯着评测脚本自己：严重度
 ## 测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest      # 112 passed
+.venv/Scripts/python.exe -m pytest      # 129 passed
 ```
 
 全部使用临时目录，**不联网、不调用真实 API、不往真实 `data/` 写**。
