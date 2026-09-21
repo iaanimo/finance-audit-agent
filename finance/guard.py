@@ -189,4 +189,11 @@ def _normalize(token: str) -> str:
         d = Decimal(raw)
     except (InvalidOperation, ValueError):
         return raw
-    return f"{d.quantize(Decimal('0.01'))}"
+    try:
+        return f"{d.quantize(Decimal('0.01'))}"
+    except InvalidOperation:
+        # 位数超过上下文精度（默认 28 位）时 quantize 直接抛异常 —— 护栏不能因为
+        # 模型写了一个超长数字就崩掉整条审核。归一化只是为了**让同一个数在
+        # 不同写法下可比**，不是为了算出值，所以退回十进制展开式即可：
+        # ``1E+40`` 与 ``1000…0`` 展开后是同一串字符，比对仍然成立。
+        return format(d, "f")

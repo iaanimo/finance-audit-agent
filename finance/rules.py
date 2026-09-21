@@ -113,6 +113,22 @@ def _skip(message: str, **evidence: Any) -> CheckOutcome:
     return CheckOutcome(passed=True, message=message, evidence=evidence)
 
 
+def _total_missing(what: str, **evidence: Any) -> CheckOutcome:
+    """票面价税合计抽不到时的统一出口：**WARN 转人工**，不猜也不定罪。
+
+    限额类规则过去写的是 ``parse_money(ctx.invoice.total or 0)`` —— 抽不到金额
+    就当成 0，于是"票面没抽出金额"被算成"0.00 元未超限额"并照常 PASS：
+    既是假通过，也让 evidence 里的 0.00 变成编出来的数字。同类信息缺失在
+    R009 / R016 都判 WARN，这里没有理由不同。
+    """
+    return CheckOutcome(
+        passed=False,
+        message=f"发票价税合计缺失，无法核对{what}，转人工复核",
+        evidence=evidence,
+        severity_override=Severity.WARN,
+    )
+
+
 # --------------------------------------------------------------------------
 # 小工具
 # --------------------------------------------------------------------------
@@ -267,11 +283,17 @@ def check_local_transport_limit(ctx: RuleContext) -> CheckOutcome:
     if not _matches_expense(ctx, "市内交通费"):
         return _skip("不适用于本单（费用类型非市内交通费）")
     limit = parse_money(ctx.policy.limits.get("local_transport_per_trip", 200))
-    actual = parse_money(ctx.invoice.total or 0)
-    ev = {"field": "价税合计", "actual": float(actual), "expected": f"<= {money_str(limit)}"}
-    if not money_le(actual, limit):
-        return _fail(f"单次市内交通费 {money_str(actual)} 元，超过限额 {money_str(limit)} 元", **ev)
-    return _pass(f"单次 {money_str(actual)} 元，未超 {money_str(limit)} 元限额", **ev)
+    total = ctx.invoice.total
+    ev = {
+        "field": "价税合计",
+        "actual": float(total) if total is not None else None,
+        "expected": f"<= {money_str(limit)}",
+    }
+    if total is None:
+        return _total_missing("单次金额是否超限", **ev)
+    if not money_le(total, limit):
+        return _fail(f"单次市内交通费 {money_str(total)} 元，超过限额 {money_str(limit)} 元", **ev)
+    return _pass(f"单次 {money_str(total)} 元，未超 {money_str(limit)} 元限额", **ev)
 
 
 def check_meal_limit(ctx: RuleContext) -> CheckOutcome:
@@ -283,7 +305,7 @@ def check_meal_limit(ctx: RuleContext) -> CheckOutcome:
     if not _matches_expense(ctx, "餐饮费"):
         return _skip("不适用于本单（费用类型非餐饮费）")
 
-    actual = parse_money(ctx.invoice.total or 0)
+    total = ctx.invoice.total
     headcount = ctx.request.headcount
 
     if not headcount or headcount <= 0:
@@ -291,8 +313,8 @@ def check_meal_limit(ctx: RuleContext) -> CheckOutcome:
             passed=False,
             message="餐饮费未注明用餐人数，无法核算人均金额，退回补充",
             evidence={
-                "field": "用餐人数", "actual": headcount,
-                "expected": ">= 1", "invoice_total": float(actual),
+                "field": "用餐人数", "actual": headcount, "expected": ">= 1",
+                "invoice_total": float(total) if total is not None else None,
             },
             severity_override=Severity.WARN,
         )
@@ -304,18 +326,28 @@ def check_meal_limit(ctx: RuleContext) -> CheckOutcome:
             severity_override=Severity.WARN,
         )
 
-    per_person = (actual / Decimal(headcount)).quantize(Decimal("0.01"))
+    if total is None:
+        return _total_missing(
+            "餐饮费人均金额",
+            field="人均金额",
+            invoice_total=None,
+            headcount=headcount,
+            actual=None,
+            expected="需先有票面金额",
+        )
+
+    per_person = (total / Decimal(headcount)).quantize(Decimal("0.01"))
     limit = parse_money(ctx.policy.limits.get("meal_per_person", 150))
     ev = {
         "field": "人均金额",
-        "invoice_total": float(actual),
+        "invoice_total": float(total),
         "headcount": headcount,
         "actual": float(per_person),
         "expected": f"<= {money_str(limit)}",
     }
     if not money_le(per_person, limit):
         return _fail(
-            f"人均 {money_str(per_person)} 元（{money_str(actual)} / {headcount} 人），"
+            f"人均 {money_str(per_person)} 元（{money_str(total)} / {headcount} 人），"
             f"超过人均限额 {money_str(limit)} 元",
             **ev,
         )
@@ -328,13 +360,26 @@ def check_hotel_limit(ctx: RuleContext) -> CheckOutcome:
         return _skip("不适用于本单（费用类型非住宿费）")
 
     nights = ctx.request.nights
-    total = parse_money(ctx.invoice.total or 0)
+    total = ctx.invoice.total
     if not nights or nights <= 0:
         return CheckOutcome(
             passed=False,
             message="住宿费未注明住宿晚数，无法核算每晚金额，退回补充",
-            evidence={"field": "住宿晚数", "actual": nights, "expected": ">= 1"},
+            evidence={
+                "field": "住宿晚数", "actual": nights, "expected": ">= 1",
+                "invoice_total": float(total) if total is not None else None,
+            },
             severity_override=Severity.WARN,
+        )
+    if total is None:
+        return _total_missing(
+            "住宿费每晚单价",
+            field="每晚单价",
+            invoice_total=None,
+            nights=nights,
+            actual=None,
+            expected="需先有票面金额",
+            city=ctx.request.city,
         )
 
     unit_price = (total / Decimal(nights)).quantize(Decimal("0.01"))
@@ -367,19 +412,21 @@ def check_office_supplies(ctx: RuleContext) -> CheckOutcome:
         return _skip("不适用于本单（费用类型非办公用品）")
 
     threshold = parse_money(ctx.policy.limits.get("office_supplies_per_invoice", 2000))
-    actual = parse_money(ctx.invoice.total or 0)
+    total = ctx.invoice.total
     ev = {
         "field": "价税合计",
-        "actual": float(actual),
+        "actual": float(total) if total is not None else None,
         "expected": f"<= {money_str(threshold)} 或已附采购清单",
         "has_itemized_list": ctx.request.has_itemized_list,
     }
-    if money_le(actual, threshold):
-        return _pass(f"金额 {money_str(actual)} 元，未超 {money_str(threshold)} 元，无需清单", **ev)
+    if total is None:
+        return _total_missing("是否需要附采购清单", **ev)
+    if money_le(total, threshold):
+        return _pass(f"金额 {money_str(total)} 元，未超 {money_str(threshold)} 元，无需清单", **ev)
     if ctx.request.has_itemized_list:
-        return _pass(f"金额 {money_str(actual)} 元超 {money_str(threshold)} 元，已附采购清单", **ev)
+        return _pass(f"金额 {money_str(total)} 元超 {money_str(threshold)} 元，已附采购清单", **ev)
     return _fail(
-        f"金额 {money_str(actual)} 元超过 {money_str(threshold)} 元且未附采购清单，提交人工复核",
+        f"金额 {money_str(total)} 元超过 {money_str(threshold)} 元且未附采购清单，提交人工复核",
         **ev,
     )
 
@@ -387,10 +434,17 @@ def check_office_supplies(ctx: RuleContext) -> CheckOutcome:
 def check_invoice_type(ctx: RuleContext) -> CheckOutcome:
     """R009 发票类型须在可接受范围内。
 
-    两种失败性质不同，故覆盖严重度（与 R011 / R014 / R016 的处理一致）：
+    三种情形的性质不同，故覆盖严重度（与 R011 / R014 / R016 的处理一致）：
 
-    - 票面写了类型但**不在白名单** -> FAIL（事实性违规，制度 3.4 写的是「不接受」）
-    - 类型**抽不到 / 为空** -> WARN（信息缺失，转人工，不替制度定罪）
+    - 票面类型**包含**某个可接受类型（如「增值税电子普通发票」）-> PASS
+    - 票面类型**不在白名单**（如「增值税纸质普通发票」）-> FAIL（制度 3.4 写的是「不接受」）
+    - 类型**抽不到 / 为空**，或抽到的只是某个可接受类型的**子串**
+      （如「电子发票」「发票」这种残缺信息）-> WARN（信息缺失，转人工，不替制度定罪）
+
+    最后一档是这个项目最容易踩的坑：**残缺信息不是证据**。「发票」两个字
+    落在「增值税电子普通发票」里面，但它什么也没证明 —— 过去正因为
+    子串**双向**命中就放行，票面只写着「发票」也能 PASS，R009 形同虚设。
+    现在方向只剩一个（白名单项必须被票面类型包住），反向命中降级为转人工。
 
     空值判 FAIL 曾把一整批「版式导致标题抽不到」的合规票误杀成 REJECTED，
     正是本项目在别处反复讲的「宁可漏报，不可误杀」。
@@ -408,8 +462,19 @@ def check_invoice_type(ctx: RuleContext) -> CheckOutcome:
     a = _norm(actual)
     for t in accepted:
         t_norm = _norm(t)
-        if t_norm and (t_norm in a or a in t_norm):
+        if t_norm and t_norm in a:
             return _pass(f"发票类型「{actual}」属于可接受类型", matched=t, **ev)
+    # 反向包含：票面类型是某个可接受类型的**子串**。信息不足以确认，
+    # 但也不构成"不在白名单"的事实认定 —— 转人工。
+    for t in accepted:
+        t_norm = _norm(t)
+        if t_norm and a in t_norm:
+            return CheckOutcome(
+                passed=False,
+                message=f"发票类型「{actual}」信息不完整，无法确认是否为可接受类型，转人工复核",
+                evidence={**ev, "possible_match": t},
+                severity_override=Severity.WARN,
+            )
     return _fail(f"发票类型「{actual}」不在可接受范围内", **ev)
 
 
@@ -425,7 +490,9 @@ def check_amount_match(ctx: RuleContext) -> CheckOutcome:
         "invoice_total": float(total) if total is not None else None,
     }
     if total is None:
-        return _fail("发票价税合计缺失，无法核对金额", **ev)
+        # 与 R016 对同一个字段的处理保持一致：票面缺金额是**信息缺失**，
+        # 退回补充即可，不该由系统直接建议驳回（那才是替制度加戏）。
+        return _total_missing("申请金额是否与票面一致", **ev)
     # **精确比较，不带容差。** 制度 3.5 写的是「必须与发票价税合计**完全一致**」，
     # 会计上还要求账证相符。「申请 1650.01、票面 1650.00」就是不一致，该退回更正。
     # money_eq 的 1 分容差是给「人均」「每晚」这类除法派生值用的，
