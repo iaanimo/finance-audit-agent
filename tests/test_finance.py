@@ -59,7 +59,12 @@ from finance.audit import (
 )
 from finance.extractor import ExtractionError, _loads_lenient, extract, extract_from_image
 from finance.guard import guard_narrative, unverifiable_numbers
-from finance.policy import parse_clause_headings
+from finance.policy import (
+    DepartmentBudget,
+    PolicyError,
+    RuleSpec,
+    parse_clause_headings,
+)
 from finance.rules import CHECKERS
 from finance.store import AuditStore, MemoryHistoryView
 from finance.store import HistoryHit
@@ -908,6 +913,33 @@ def test_voucher_balance_is_exact_not_tolerant(policy):
         "R013",
     )
     assert f.severity is Severity.FAIL
+
+
+def test_policy_error_on_malformed_rules_yaml():
+    """制度文件写坏了，要在**加载时**炸出 PolicyError，而不是裸 KeyError。
+
+    `load_policy_bundle` 的契约是"文件缺漏或格式错误抛 PolicyError，启动时就该炸"。
+    裸 `KeyError` 只给一个字段名，不告诉你是哪个文件、哪一条规则 ——
+    而 rules.yaml 是给人改的，报错就得指到人改得动的地方。
+    """
+    with pytest.raises(PolicyError) as exc:
+        RuleSpec.from_dict({"rule_id": "R999"})
+    msg = str(exc.value)
+    assert "R999" in msg and "clause" in msg
+
+
+def test_policy_error_on_illegal_severity():
+    with pytest.raises(PolicyError) as exc:
+        RuleSpec.from_dict({
+            "rule_id": "R999", "clause": "9.9", "title": "x",
+            "severity_on_fail": "爆炸", "checker": "check_x",
+        })
+    assert "R999" in str(exc.value)
+
+
+def test_policy_error_on_malformed_budget():
+    with pytest.raises(PolicyError):
+        DepartmentBudget.from_dict({"name": "技术部", "annual_budget": "五千"})
 
 
 def test_amount_consistency_is_exact_not_tolerant(policy):

@@ -269,3 +269,26 @@ def test_health_reports_demo_mode(client, monkeypatch):
     assert client.get("/api/health").json()["demo_mode"] is False
     monkeypatch.setattr(server, "DEMO_MODE", True)
     assert client.get("/api/health").json()["demo_mode"] is True
+
+
+# ---------------------------------------------------------------------------
+# 非法 audit_id 必须是 404，不是 500
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["/api/audit/!!!", "/api/audit/!!!/log"])
+def test_illegal_audit_id_is_404_not_500(client, path):
+    """用户输入不该打出未捕获异常。
+
+    实测过：`/api/audit/!!!` 会让 ``store._safe_id`` 抛 ValueError，
+    而三个端点都没接 —— 直接 500，堆栈进日志。路径穿越本身是被挡住的
+    （``_safe_id`` 会拒），但"挡住了"和"体面地拒绝"是两回事。
+    """
+    assert client.get(path).status_code == 404
+
+
+def test_illegal_audit_id_on_decide_is_404(client):
+    resp = client.post(
+        "/api/audit/!!!/decide", json={"decision": "APPROVED", "operator": "x"}
+    )
+    assert resp.status_code == 404

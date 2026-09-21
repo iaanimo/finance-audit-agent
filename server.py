@@ -34,7 +34,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
-from finance import Decision, ReimbursementRequest, parse_money
+from finance import AuditResult, Decision, ReimbursementRequest, parse_money
 from finance.audit import AuditError, OverrideReasonRequired, decide, run_audit
 from finance.store import AuditStore
 from tools.file_ops import resolve_data_path
@@ -221,15 +221,13 @@ async def audit_run(req: AuditRunRequest):
 
 @app.get("/api/audit/{audit_id}")
 async def audit_detail(audit_id: str):
-    result = AUDIT_STORE.load(audit_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="审核单不存在。")
-    return result.to_json_dict()
+    return _load_or_404(audit_id).to_json_dict()
 
 
 @app.get("/api/audit/{audit_id}/log")
 async def audit_log(audit_id: str):
     """审计轨迹。只追加，不可修改 —— 页面上的"可追溯"指的就是这个。"""
+    _load_or_404(audit_id)          # 非法/不存在的 id 先挡在门外
     return {"events": AUDIT_STORE.read_log(audit_id)}
 
 
@@ -239,9 +237,7 @@ async def audit_decide(audit_id: str, req: AuditDecideRequest):
 
     与系统建议相反而未填理由 -> 400（制度 2.3 的服务端强制）。
     """
-    result = AUDIT_STORE.load(audit_id)
-    if result is None:
-        raise HTTPException(status_code=404, detail="审核单不存在。")
+    result = _load_or_404(audit_id)
 
     try:
         decision = Decision(req.decision.upper())
@@ -303,6 +299,22 @@ async def audit_reset():
 # ---------------------------------------------------------------------------
 # 内部
 # ---------------------------------------------------------------------------
+
+
+def _load_or_404(audit_id: str) -> AuditResult:
+    """按 id 取审核单；id 非法或不存在一律 404。
+
+    ``store._safe_id`` 会拒绝含非法字符的 id 并抛 ``ValueError`` ——
+    路径穿越本身是挡住的，但如果不接这个异常，用户随手敲一个
+    ``/api/audit/!!!`` 就会拿到 500 和一条堆栈日志。**用户输入不该打出未捕获异常。**
+    """
+    try:
+        result = AUDIT_STORE.load(audit_id)
+    except ValueError:
+        result = None
+    if result is None:
+        raise HTTPException(status_code=404, detail="审核单不存在。")
+    return result
 
 
 def _build_request(spec: dict) -> ReimbursementRequest:

@@ -35,6 +35,19 @@ DEFAULT_POLICY_DIR = Path(__file__).resolve().parent / "policies"
 # --------------------------------------------------------------------------
 
 
+def _require(d: dict[str, Any], key: str, kind: str, ident_key: str = "") -> Any:
+    """取制度 YAML 里的必填字段；缺了就报**能定位**的错误。
+
+    直接用 ``d[key]`` 会抛裸 ``KeyError: 'checker'`` —— 不说是哪个文件、
+    哪条规则，和 :class:`PolicyError` 的契约（"启动时就该炸，且要知道炸在哪"）
+    对不上。少了这个包装，排查的人得自己去翻 YAML 猜。
+    """
+    if key not in d or d[key] in (None, ""):
+        ident = d.get(ident_key) or "?"
+        raise PolicyError(f"{kind}「{ident}」缺少必填字段 {key!r}")
+    return d[key]
+
+
 @dataclass(frozen=True)
 class RuleSpec:
     """一条规则的元数据。**不含判定逻辑** —— 逻辑在 rules.py 的 checker 函数里。
@@ -53,13 +66,27 @@ class RuleSpec:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "RuleSpec":
+        # 必填字段按**声明顺序**逐个检查：YAML 改坏时，报出来的第一条就是
+        # 从上往下看的第一处缺口，不用来回试。
+        rule_id = _require(d, "rule_id", "规则")
+        clause = str(_require(d, "clause", "规则", "rule_id"))
+        title = _require(d, "title", "规则", "rule_id")
+        raw_severity = _require(d, "severity_on_fail", "规则", "rule_id")
+        checker = _require(d, "checker", "规则", "rule_id")
+        try:
+            severity = Severity(raw_severity)
+        except ValueError as exc:
+            raise PolicyError(
+                f"规则「{rule_id}」的 severity_on_fail 取值非法：{raw_severity!r}"
+                f"（只能是 {'、'.join(s.value for s in Severity)}）"
+            ) from exc
         return cls(
-            rule_id=d["rule_id"],
-            clause=str(d["clause"]),
-            title=d["title"],
+            rule_id=rule_id,
+            clause=clause,
+            title=title,
             clause_text=d.get("clause_text", ""),
-            severity_on_fail=Severity(d["severity_on_fail"]),
-            checker=d["checker"],
+            severity_on_fail=severity,
+            checker=checker,
         )
 
 
@@ -74,9 +101,9 @@ class AccountSpec:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "AccountSpec":
         return cls(
-            expense_type=d["expense_type"],
+            expense_type=_require(d, "expense_type", "科目映射"),
             keywords=tuple(d.get("keywords", [])),
-            debit_account=d["debit_account"],
+            debit_account=_require(d, "debit_account", "科目映射", "expense_type"),
         )
 
 
@@ -95,7 +122,7 @@ class VatCategory:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "VatCategory":
         return cls(
-            name=d["name"],
+            name=_require(d, "name", "税率类别"),
             keywords=tuple(d.get("keywords", [])),
             rates=tuple(int(r) for r in d.get("rates", [])),
         )
@@ -117,11 +144,13 @@ class DepartmentBudget:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "DepartmentBudget":
         from .models import parse_money
-        return cls(
-            name=d["name"],
-            annual_budget=parse_money(d["annual_budget"]),
-            used=parse_money(d["used"]),
-        )
+        name = _require(d, "name", "部门预算")
+        try:
+            annual_budget = parse_money(_require(d, "annual_budget", "部门预算", "name"))
+            used = parse_money(_require(d, "used", "部门预算", "name"))
+        except ValueError as exc:
+            raise PolicyError(f"部门预算「{name}」的金额无法解析：{exc}") from exc
+        return cls(name=name, annual_budget=annual_budget, used=used)
 
 
 @dataclass
@@ -213,8 +242,10 @@ def load_policy_bundle(policy_dir: str | Path | None = None) -> PolicyBundle:
         raise PolicyError("rules.yaml 里没有任何规则")
 
     budgets = {
-        d["name"]: DepartmentBudget.from_dict(d)
-        for d in budgets_doc.get("departments", [])
+        spec.name: spec
+        for spec in (
+            DepartmentBudget.from_dict(d) for d in budgets_doc.get("departments", [])
+        )
     }
 
     return PolicyBundle(
