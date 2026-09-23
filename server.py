@@ -41,17 +41,26 @@ from tools.file_ops import resolve_data_path
 
 HERE = Path(__file__).resolve().parent
 LOGS_DIR = HERE / "logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler(LOGS_DIR / "finance-audit.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger("finance-audit")
+
+
+def setup_logging() -> None:
+    """初始化日志（建 logs/ 目录 + 挂文件/控制台 handler）。**只在启动时调用。**
+
+    这里刻意**不在 import 时执行**：模块一被导入就建目录、打开日志文件，是
+    典型的 import 副作用 —— 测试一 import server 就往真实 logs/ 里写；在只读
+    环境（只读容器挂载、CI 沙箱）里 import server 更是直接 PermissionError，
+    连测试收集都会整个中断。日志是运行期的事，就该在启动时做。
+    """
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(LOGS_DIR / "finance-audit.log", encoding="utf-8"),
+            logging.StreamHandler(),
+        ],
+    )
 
 app = FastAPI(title="财务报销审核受控 Agent", docs_url="/docs")
 
@@ -226,9 +235,16 @@ async def audit_detail(audit_id: str):
 
 @app.get("/api/audit/{audit_id}/log")
 async def audit_log(audit_id: str):
-    """审计轨迹。只追加，不可修改 —— 页面上的"可追溯"指的就是这个。"""
+    """审计轨迹。只追加，不可修改 —— 页面上的"可追溯"指的就是这个。
+
+    ``chain`` 字段是哈希链校验结果：任何一行被事后改动都能被发现并定位
+    （见 ``finance/store.py::AuditStore.verify_log``）。
+    """
     _load_or_404(audit_id)          # 非法/不存在的 id 先挡在门外
-    return {"events": AUDIT_STORE.read_log(audit_id)}
+    return {
+        "events": AUDIT_STORE.read_log(audit_id),
+        "chain": AUDIT_STORE.verify_log(audit_id),
+    }
 
 
 @app.post("/api/audit/{audit_id}/decide")
@@ -387,6 +403,8 @@ def _build_request(spec: dict) -> ReimbursementRequest:
 
 
 def main() -> None:
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="财务报销审核受控 Agent")
     parser.add_argument("--host", default="127.0.0.1", help="绑定地址（0.0.0.0 可局域网访问）")
     parser.add_argument("--port", type=int, default=8000, help="端口")

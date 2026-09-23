@@ -24,8 +24,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
-from datetime import date, datetime
+import threading
+import time
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -34,6 +38,24 @@ from .rules import HistoryHit
 
 AUDIT_FILE_SUFFIX = ".json"
 LOG_FILE_SUFFIX = ".log.jsonl"
+LOCK_FILE_SUFFIX = ".lock"
+
+#: 哈希链的"创世"前驱哈希。
+GENESIS_HASH = "0" * 64
+
+#: 进程内的决策锁注册表：audit_id -> threading.Lock（见 :meth:`AuditStore.decision_lock`）
+_LOCKS_GUARD = threading.Lock()
+_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _hash_record(record: dict[str, Any]) -> str:
+    """审计事件的哈希：对**不含 hash 字段本身**的记录做规范化 JSON 的 SHA-256。
+
+    ``sort_keys`` 让同一内容的键序差异不影响哈希 —— 哈希要证明的是
+    "内容被改过没有"，不是"键顺序被重排过没有"。
+    """
+    payload = json.dumps(record, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _default_base_dir() -> Path:
@@ -117,17 +139,54 @@ class AuditStore:
         items.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
         return items
 
-    # ---- 审计日志（只追加） ----
+    # ---- 审计日志（只追加 + 哈希链） ----
 
     def append_log(self, audit_id: str, event: dict[str, Any]) -> None:
-        """追加一条审计事件。**只写不改**，文件用 ``.log.jsonl``（每行一个 JSON）。"""
+        """追加一条审计事件。**只写不改**，文件用 ``.log.jsonl``（每行一个 JSON）。
+
+        每条事件带 ``seq / prev / hash`` 组成**哈希链**：``hash`` 是本条内容
+        （含前条哈希）的 SHA-256。事后改动任何一行，:meth:`verify_log` 都能
+        指出从哪一条断的。"只追加"过去只是**约定**（能写就能改），哈希链把它
+        变成**可检测**的保证 —— 会计档案场景里，"改了会被发现"比"不许改"更实在。
+        """
         self._ensure_dir()
+        path = self._log_path(audit_id)
+        prev_hash, seq = self._chain_tail(audit_id)
         record = {
-            "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+            # 统一 UTC：audit 单的 decided_at / created_at 也是 UTC。
+            # 审计时间线混两种时区格式，复盘对表时必然困惑。
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "seq": seq,
+            "prev": prev_hash,
             **event,
         }
-        with self._log_path(audit_id).open("a", encoding="utf-8") as fh:
+        record["hash"] = _hash_record(record)
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _chain_tail(self, audit_id: str) -> tuple[str, int]:
+        """哈希链的链尾：(前一条的 hash, 下一条的 seq)。演示规模下直接重扫。"""
+        events = self.read_log(audit_id)
+        if not events:
+            return GENESIS_HASH, 1
+        last = events[-1]
+        return str(last.get("hash") or GENESIS_HASH), int(last.get("seq") or len(events)) + 1
+
+    def verify_log(self, audit_id: str) -> dict[str, Any]:
+        """校验审计日志哈希链的完整性。
+
+        :return: ``{"ok": bool, "checked": int, "broken_at": int | None}``
+                 —— ``broken_at`` 是第一条对不上的事件 ``seq``，供排查定位。
+        """
+        prev = GENESIS_HASH
+        checked = 0
+        for rec in self.read_log(audit_id):
+            checked += 1
+            body = {k: v for k, v in rec.items() if k != "hash"}
+            if rec.get("hash") != _hash_record(body) or rec.get("prev") != prev:
+                return {"ok": False, "checked": checked, "broken_at": rec.get("seq", checked)}
+            prev = rec.get("hash") or GENESIS_HASH
+        return {"ok": True, "checked": checked, "broken_at": None}
 
     def read_log(self, audit_id: str) -> list[dict[str, Any]]:
         """读回审计轨迹。坏行跳过，不抛异常（轨迹残缺好过整个读不出来）。"""
@@ -189,11 +248,40 @@ class AuditStore:
         removed = 0
         for path in self.base_dir.iterdir():
             if path.is_file() and (
-                path.name.endswith(AUDIT_FILE_SUFFIX) or path.name.endswith(LOG_FILE_SUFFIX)
+                path.name.endswith(AUDIT_FILE_SUFFIX)
+                or path.name.endswith(LOG_FILE_SUFFIX)
+                or path.name.endswith(LOCK_FILE_SUFFIX)
             ):
                 path.unlink()
                 removed += 1
         return removed
+
+    # ---- 决策锁 ----
+
+    @contextlib.contextmanager
+    def decision_lock(self, audit_id: str):
+        """同一审核单的「检查已决定 + 落盘」临界区。
+
+        ``decide()`` 原来是"读内存判断再写盘"——典型的 read-modify-write 竞态：
+        两个审核员各持一份旧快照，先后点按钮，**两人都能通过"未决定"的检查**，
+        后写覆盖先写。而"谁能批、批了几次"正是这个项目的核心命题。
+        这里用「线程锁 + 文件锁」双层把该操作串行化：线程锁管同进程并发
+        （uvicorn 单进程多执行流），文件锁管多进程（比如误开了两个 server）。
+        """
+        key = _safe_id(audit_id)
+        with _LOCKS_GUARD:
+            tlock = _LOCKS.setdefault(key, threading.Lock())
+        with tlock:
+            self._ensure_dir()
+            fh = (self.base_dir / f"{key}{LOCK_FILE_SUFFIX}").open("a+b")
+            try:
+                _lock_file(fh)
+                try:
+                    yield
+                finally:
+                    _unlock_file(fh)
+            finally:
+                fh.close()
 
 
 class StoreHistoryView:
@@ -283,6 +371,47 @@ class MemoryHistoryView:
             for h in self._hits
             if h.seller_name == seller_name and h.issue_date == issue_date
         ]
+
+
+def _lock_file(fh) -> None:
+    """对文件首字节加排他锁（Windows 用 msvcrt，POSIX 用 fcntl）。
+
+    锁 1 个字节的区域就够 —— 这里要的是"同一时刻只有一个决策在进行"，
+    不是锁内容。等锁上限 5 秒，超时抛出，不无限挂着。
+    """
+    fh.seek(0)
+    if not fh.read(1):
+        fh.write(b"\0")
+        fh.flush()
+    fh.seek(0)
+    try:
+        import msvcrt
+    except ImportError:  # POSIX
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        return
+    deadline = time.time() + 5.0
+    while True:
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            if time.time() >= deadline:
+                raise TimeoutError("等待审核单决策锁超时（另一进程正在决定这张单）")
+            time.sleep(0.05)
+
+
+def _unlock_file(fh) -> None:
+    fh.seek(0)
+    try:
+        import msvcrt
+    except ImportError:  # POSIX
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return
+    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _safe_id(audit_id: str) -> str:

@@ -169,6 +169,9 @@ class PolicyBundle:
     budgets: dict[str, DepartmentBudget]
     vat_categories: list[VatCategory] = field(default_factory=list)
     simplified_levy_rate: int = 3
+    #: 本公司是否可抵扣进项税额（一般纳税人 = True，小规模纳税人 = False）。
+    #: 与「专用发票」两个条件**同时**成立才拆进项税额行 —— 见 finance/voucher.py。
+    input_tax_deductible: bool = True
     policy_md: str = ""
     fiscal_year: int = 2026
 
@@ -261,6 +264,7 @@ def load_policy_bundle(policy_dir: str | Path | None = None) -> PolicyBundle:
         budgets=budgets,
         vat_categories=[VatCategory.from_dict(d) for d in vat_doc.get("categories", [])],
         simplified_levy_rate=int(vat_doc.get("simplified_levy_rate", 3)),
+        input_tax_deductible=bool(company.get("input_tax_deductible", True)),
         policy_md=policy_md,
         fiscal_year=int(budgets_doc.get("fiscal_year", 2026)),
     )

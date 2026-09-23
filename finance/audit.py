@@ -207,40 +207,49 @@ def decide(
 
     :raises OverrideReasonRequired: 推翻系统建议却没给理由
     """
-    if result.decision is not None:
-        raise AuditError(f"审核单 {result.audit_id} 已由 {result.operator} 做过决定")
+    # 「检查已决定 + 落盘」必须在锁内做 —— 否则是 read-modify-write 竞态：
+    # 两个审核员各持一份旧快照先后点按钮，**两人都能通过"未决定"的检查**，
+    # 后写覆盖先写。所以除了看手里的 result，还要在锁内**重新读一次盘**。
+    with store.decision_lock(result.audit_id):
+        on_disk = store.load(result.audit_id)
+        if on_disk is not None and on_disk.decision is not None:
+            raise AuditError(
+                f"审核单 {result.audit_id} 已由 {on_disk.operator} 做过决定"
+            )
+        if result.decision is not None:
+            raise AuditError(f"审核单 {result.audit_id} 已由 {result.operator} 做过决定")
 
-    if result.is_overridden_now(decision) and not override_reason.strip():
-        raise OverrideReasonRequired(
-            f"系统建议为 {result.suggested_status.value}，"
-            f"你的决定是 {decision.value}，属于推翻系统建议，必须填写书面理由"
+        if result.is_overridden_now(decision) and not override_reason.strip():
+            raise OverrideReasonRequired(
+                f"系统建议为 {result.suggested_status.value}，"
+                f"你的决定是 {decision.value}，属于推翻系统建议，必须填写书面理由"
+            )
+
+        # 推翻"驳回"而批准 —— 补一张凭证草稿，否则后面无账可入
+        if decision is Decision.APPROVED and result.voucher is None:
+            policy = policy or load_policy_bundle()
+            _try_build_voucher(result, policy)
+
+        result.decision = decision
+        result.operator = operator
+        result.override_reason = override_reason.strip()
+        result.decided_at = datetime.now(timezone.utc)
+        result.state = (
+            AuditState.APPROVED if decision is Decision.APPROVED else AuditState.REJECTED
         )
 
-    # 推翻"驳回"而批准 —— 补一张凭证草稿，否则后面无账可入
-    if decision is Decision.APPROVED and result.voucher is None:
-        policy = policy or load_policy_bundle()
-        _try_build_voucher(result, policy)
-
-    result.decision = decision
-    result.operator = operator
-    result.override_reason = override_reason.strip()
-    result.decided_at = datetime.now(timezone.utc)
-    result.state = (
-        AuditState.APPROVED if decision is Decision.APPROVED else AuditState.REJECTED
-    )
-
-    store.append_log(
-        result.audit_id,
-        {
-            "event": "decided",
-            "suggested_status": result.suggested_status.value,
-            "decision": decision.value,
-            "operator": operator,
-            "overridden": result.is_overridden,
-            "override_reason": result.override_reason,
-        },
-    )
-    store.save(result)
+        store.append_log(
+            result.audit_id,
+            {
+                "event": "decided",
+                "suggested_status": result.suggested_status.value,
+                "decision": decision.value,
+                "operator": operator,
+                "overridden": result.is_overridden,
+                "override_reason": result.override_reason,
+            },
+        )
+        store.save(result)
     return result
 
 

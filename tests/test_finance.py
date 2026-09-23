@@ -454,10 +454,12 @@ def test_inv4e_guard_blocks_conflicting_and_out_of_place_verdicts():
     assert source is NarrativeSource.TEMPLATE
 
     pending = evaluate(
-        # 大写必须跟着 total 一起改，否则 R016（大小写一致）会先判 FAIL，
-        # 汇总就不是 PENDING 而是 REJECTED 了
+        # 夹具要自洽：大写跟着 total 一起改、金额/税额也得勾稽（566.04 + 33.96
+        # = 600.00），否则 R016 或 R013 会先判 FAIL，汇总就不是 PENDING 了
         make_invoice(
-            item_name="*餐饮服务*餐费", total="600.00", total_in_words="陆佰圆整"
+            item_name="*餐饮服务*餐费",
+            amount="566.04", tax_amount="33.96",
+            total="600.00", total_in_words="陆佰圆整",
         ),
         make_request(expense_type="餐饮费", amount="600.00", nights=None, headcount=None),
         load_policy_bundle(),
@@ -880,6 +882,8 @@ def test_vat_rate_decimal_form_accepted(policy):
     assert _parse_rate("0.06") == 6.0
     assert _parse_rate("13％") == 13.0   # 全角百分号
     assert _parse_rate("6") == 6.0
+    assert _parse_rate("1") == 1.0       # 裸「1」是 1%（小规模减按征收常见），不是 100%
+    assert _parse_rate("0.5") == 50.0
     assert _parse_rate("") is None
 
 
@@ -943,10 +947,15 @@ def test_parse_money_tolerates_invoice_noise():
 def test_voucher_is_balanced(policy):
     """凭证借贷必须相等 —— 而且这个相等是**算出来的**，不是写死的。
 
-    借方拆成「不含税金额 + 进项税额」两行，所以借贷平衡是一次真的加法校验。
-    若借方只写一行总额，R013 就成了恒真式（见 test_r013_is_not_tautological）。
+    **专用发票**借方拆「不含税金额 + 进项税额」两行，所以借贷平衡是一次真的
+    加法校验。普通发票不拆（进项不可抵扣，见
+    :func:`test_voucher_single_line_for_general_invoice`）—— 这不再让 R013 变成
+    恒真式：R013 现在直接校验票面三要素勾稽（见
+    :func:`test_r013_catches_inconsistent_general_invoice`）。
     """
-    v = build_voucher(make_invoice(), make_request(), policy)
+    v = build_voucher(
+        make_invoice(invoice_type="电子发票（专用发票）"), make_request(), policy
+    )
     assert v.balanced
     assert v.debit_total == parse_money("1650.00")
     # 借方两行：不含税 + 税额；贷方一行
@@ -1003,9 +1012,14 @@ def test_r013_catches_an_invoice_that_does_not_add_up(policy):
     守的是这个：如果哪天有人给拆分逻辑加一句「拆出来合不上就退回单行写法」，
     借贷又变成写死的相等，这条会立刻红。加那句话的初衷是"别因为拆不开就出不了凭证"，
     但那等于把「票面自己都对不上」这件事实**悄悄抹掉** —— 财务上不能这么干。
+
+    （这条走的是**专用发票**的拆行路径。普通发票不拆行、借贷恒等，同样的票面
+    矛盾由 R013 的三要素勾稽直接抓住，见
+    :func:`test_r013_catches_inconsistent_general_invoice`。）
     """
     # 1000.00 + 60.00 = 1060.00，票面却写 1200.00
     inv = make_invoice(
+        invoice_type="电子发票（专用发票）",   # 专票才拆两行 —— 这条测拆行路径
         amount="1000.00", tax_amount="60.00", total="1200.00",
         total_in_words="壹仟贰佰圆整",
     )
@@ -1019,7 +1033,10 @@ def test_r013_catches_an_invoice_that_does_not_add_up(policy):
     findings = evaluate(inv, req, policy, history=MemoryHistoryView(), voucher=v)
     f = finding_of(findings, "R013")
     assert f.severity is Severity.FAIL
-    assert f.evidence["debit_total"] != f.evidence["credit_total"]
+    # 先命中的是「票面三要素勾稽」（票面自相矛盾本身就是 FAIL 的事实依据），
+    # 凭证借贷不平是同一事实的另一面 —— 由上面 `not v.balanced` 钉住
+    assert f.evidence["computed_total"] == 1060.0
+    assert f.evidence["total"] == 1200.0
 
 
 def test_voucher_balance_is_exact_not_tolerant(policy):
@@ -1028,7 +1045,10 @@ def test_voucher_balance_is_exact_not_tolerant(policy):
     1 分容差是为「人均」「每晚」这类**除法派生值**准备的（制度 4.2/4.3），
     借贷平衡用不上它 —— 会计上不存在差了 1 分还叫平衡的凭证。
     """
-    inv = make_invoice(amount="1556.60", tax_amount="93.39", total="1650.00")
+    inv = make_invoice(
+        invoice_type="电子发票（专用发票）",   # 专票才拆两行，才有借方加法
+        amount="1556.60", tax_amount="93.39", total="1650.00",
+    )
     v = build_voucher(inv, make_request(), policy)
     assert v.debit_total == parse_money("1649.99")
     assert v.credit_total == parse_money("1650.00")
@@ -1521,3 +1541,137 @@ def test_tests_do_not_write_real_data_dir():
         if p.is_file() and ("test" in p.name.lower() or p.name.startswith("tmp"))
     ]
     assert not suspicious, f"测试疑似写进了真实 data/audits：{suspicious}"
+
+
+# ==========================================================================
+# 加固回归（2026-09-23）：凭证会计口径 / 审计留痕 / 并发决策
+# ==========================================================================
+
+
+def test_voucher_single_line_for_general_invoice(policy):
+    """**普通发票不拆进项税额行** —— 普票进项不可抵扣，税额随价税合计全额进费用。
+
+    这是会计口径问题，不是排版偏好：把普票的税额记进「应交税费-应交增值税
+    （进项税额）」是真财务一眼看穿的错误。13 张演示样本全是普通发票 ——
+    修复之前，每一张演示票的凭证草稿都在犯这个错。
+    """
+    v = build_voucher(make_invoice(), make_request(), policy)   # 默认普票
+    assert v.balanced
+    debits = [l for l in v.lines if l.direction == "借"]
+    assert len(debits) == 1, "普票借方应当单行（价税合计全额进费用）"
+    assert debits[0].amount == parse_money("1650.00")
+
+
+def test_voucher_splits_input_tax_only_for_special_invoice(policy):
+    """**专用发票**才拆「不含税金额 + 进项税额」两行。"""
+    inv = make_invoice(invoice_type="电子发票（专用发票）")
+    v = build_voucher(inv, make_request(), policy)
+    debits = [l for l in v.lines if l.direction == "借"]
+    assert len(debits) == 2
+    assert debits[1].account == policy.input_tax_account
+    assert debits[0].amount + debits[1].amount == parse_money("1650.00")
+
+
+def test_voucher_respects_input_tax_deductible_flag(policy):
+    """公司是小规模纳税人（input_tax_deductible: false）时，专票也不拆 ——
+    小规模纳税人取得的发票进项税额同样不得抵扣。"""
+    inv = make_invoice(invoice_type="电子发票（专用发票）")
+    old = policy.input_tax_deductible
+    policy.input_tax_deductible = False
+    try:
+        v = build_voucher(inv, make_request(), policy)
+    finally:
+        policy.input_tax_deductible = old
+    assert len([l for l in v.lines if l.direction == "借"]) == 1
+
+
+def test_r013_catches_inconsistent_general_invoice(policy):
+    """普票票面自相矛盾也必须被 R013 抓住 —— **这张网不再依赖凭证形状**。
+
+    普票凭证是单行写法，借贷恒等（恒真式）。如果 R013 只看"凭证借贷平不平"，
+    「1000 + 60 ≠ 1200」这种票面矛盾就会溜过去。现在 R013 直接对票面三要素
+    做加法 —— 哪天有人把凭证改回"合不上就退回单行"，这张网依然在。
+    """
+    inv = make_invoice(
+        amount="1000.00", tax_amount="60.00", total="1200.00",
+        total_in_words="壹仟贰佰圆整",
+    )
+    req = make_request(amount="1200.00")
+    v = build_voucher(inv, req, policy)
+    assert v.balanced, "普票单行凭证借贷恒等 —— 正因如此，R013 不能只看凭证"
+
+    f = finding_of(
+        evaluate(inv, req, policy, history=MemoryHistoryView(), voucher=v), "R013"
+    )
+    assert f.severity is Severity.FAIL
+    assert "自相矛盾" in f.message
+
+
+def test_log_hash_chain_detects_tampering(tmp_path):
+    """审计日志的"只追加"过去只是**约定**（能写就能改），哈希链把它变成
+    **可检测**：事后改任何一行，verify_log 都能指出从哪一条断的。"""
+    store = AuditStore(base_dir=tmp_path)
+    store.append_log("abc123", {"event": "one"})
+    store.append_log("abc123", {"event": "two"})
+    assert store.verify_log("abc123") == {"ok": True, "checked": 2, "broken_at": None}
+
+    # 事后篡改第一条的内容
+    path = store._log_path("abc123")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    lines[0] = lines[0].replace('"one"', '"tampered"')
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    verdict = store.verify_log("abc123")
+    assert verdict["ok"] is False
+    assert verdict["broken_at"] == 1
+
+
+def test_log_timestamps_are_utc(tmp_path):
+    """审计时间线统一 UTC —— 与审核单的 decided_at / created_at 同源，
+    复盘对表时不会一半本地时间一半 UTC。"""
+    store = AuditStore(base_dir=tmp_path)
+    store.append_log("abc123", {"event": "one"})
+    rec = store.read_log("abc123")[0]
+    assert rec["ts"].endswith("+00:00")
+
+
+def test_decide_is_race_safe_stale_snapshot_loses(tmp_path):
+    """两个审核员各持一份旧快照，**只有一个人能批** —— decide 在锁内重读磁盘。
+
+    过去 decide 只看手里的对象："未决定"检查是读-改-写竞态，两人先后点按钮
+    都能通过，后写覆盖先写 —— 而"谁能批、批了几次"正是本项目的核心命题。
+    """
+    store = AuditStore(base_dir=tmp_path)
+    result = _rejected_result(store)
+    stale_a = store.load(result.audit_id)
+    stale_b = store.load(result.audit_id)
+
+    decide(stale_a, Decision.REJECTED, "张伟", store=store)
+    with pytest.raises(AuditError):
+        decide(stale_b, Decision.APPROVED, "李四", store=store, override_reason="我不同意")
+
+    final = store.load(result.audit_id)
+    assert final.decision is Decision.REJECTED
+    assert final.operator == "张伟"
+
+
+def test_serial_window_is_configurable(policy):
+    """R012 连号窗口从 rules.yaml 的 serial_invoice_max_gap 读，不是写死的。"""
+    inv = make_invoice(invoice_number="100")
+    far = HistoryHit(
+        audit_id="old", invoice_key="k", invoice_number="104",
+        seller_name=inv.seller_name, issue_date=inv.issue_date,
+    )
+    history = MemoryHistoryView([far])
+    req = make_request()
+
+    policy.limits["serial_invoice_max_gap"] = 5
+    try:
+        f = finding_of(evaluate(inv, req, policy, history=history), "R012")
+        assert f.severity is Severity.WARN, "窗口放到 5，隔 4 号应视为连号"
+
+        policy.limits["serial_invoice_max_gap"] = 2
+        f = finding_of(evaluate(inv, req, policy, history=history), "R012")
+        assert f.severity is Severity.PASS, "窗口收窄到 2，隔 4 号不算连号"
+    finally:
+        policy.limits.pop("serial_invoice_max_gap", None)
