@@ -220,3 +220,10 @@ rules:
     clause_text: "发票所载税率应与票面项目适用的增值税税率相符。适用税率与票面项目不符的，不得报销。例外：销售方为小规模纳税人、适用简易计税的，票面税率为征收率 3%，属正常情形。"
     severity_on_fail: FAIL
     checker: check_vat_rate
+
+  - rule_id: R018
+    clause: "3.9"
+    title: 发票查验（真伪/状态）
+    clause_text: "发票须经税务机关发票查验平台核验真伪及状态。查验显示查无此票、作废或红冲的，不得报销。查验平台暂未接入、或本次查验未能完成的，提交人工复核。"
+    severity_on_fail: FAIL
+    checker: check_invoice_verification

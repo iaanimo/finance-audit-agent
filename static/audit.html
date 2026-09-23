@@ -679,6 +679,15 @@ function loadLog(auditId) {
       if (!box) return;
       var evs = d.events || [];
       if (!evs.length) { box.innerHTML = '<div class="hint">暂无轨迹</div>'; return; }
+      /* 哈希链校验状态：只追加是约定，"改了会被发现"才是保证 —— 得让人看见 */
+      var chain = d.chain || null;
+      var badge = '';
+      if (chain) {
+        badge = chain.ok
+          ? '<div class="hint">✓ 轨迹完整（哈希链校验通过，共 ' + chain.checked + ' 条）</div>'
+          : '<div class="hint" style="color:#c0392b;font-weight:600">⚠ 轨迹第 ' +
+            esc(String(chain.broken_at)) + ' 条被篡改（哈希链校验失败）</div>';
+      }
       var html = '<table class="log"><thead><tr><th style="width:150px">时间</th>' +
         '<th style="width:130px">事件</th><th>详情</th></tr></thead><tbody>';
       evs.forEach(function (e) {
@@ -687,7 +696,7 @@ function loadLog(auditId) {
           '<td class="ev">' + esc(e.event) + '</td>' +
           '<td>' + esc(json(rest).replace(/\s+/g, ' ')) + '</td></tr>';
       });
-      box.innerHTML = html + '</tbody></table>';
+      box.innerHTML = badge + html + '</tbody></table>';
     })
     .catch(function () {
       var box = el('logBox'); if (box) box.innerHTML = '<div class="hint">轨迹读取失败</div>';
