@@ -53,6 +53,12 @@
   input:focus, select:focus, textarea:focus { outline: 2px solid #cdd9f8; border-color: var(--brand); }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .upload-icon {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 56px; height: 56px; border: 1.5px dashed var(--line); border-radius: 10px;
+    color: var(--muted); cursor: pointer; transition: .15s;
+  }
+  .upload-icon:hover { color: #2563eb; border-color: #2563eb; background: #f5f8ff; }
   .notice {
     margin-top: 10px; padding: 9px 11px; border-radius: 5px; font-size: 12px;
     background: var(--warn-bg); border: 1px solid #ecd9a0; color: #6b4a00;
@@ -213,7 +219,18 @@
         <div class="hint" id="sampleHint">选样本会自动填好下面表单，并载入对应发票。</div>
 
         <label>发票文件</label>
-        <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg">
+        <!-- 原生 file 按钮换成图标控件：input 隐藏，点图标触发选择 —— 行为与原来完全一致，
+             只是视觉从"选择文件"变成图标。已选文件名仍显示在下面的 fileHint 状态行。 -->
+        <label class="upload-icon" for="fileInput" role="button"
+               title="点击选择发票文件（PDF / 图片）" aria-label="上传发票文件">
+          <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 15V4"/>
+            <path d="M7.5 8.5 12 4l4.5 4.5"/>
+            <path d="M4 15v3.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V15"/>
+          </svg>
+        </label>
+        <input type="file" id="fileInput" accept=".pdf,.png,.jpg,.jpeg" hidden>
         <div class="hint" id="fileHint">未选择样本时，用这里上传 PDF 或发票图片。</div>
 
         <div class="notice" id="manualNotice" style="display:none">
