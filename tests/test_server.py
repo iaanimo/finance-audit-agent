@@ -341,3 +341,52 @@ def test_importing_server_does_not_attach_file_handler():
         and str(getattr(h, "baseFilename", "")).startswith(str(server.LOGS_DIR))
     ]
     assert not offenders, f"root logger 挂了 logs/ 里的文件 handler（import 副作用）：{offenders}"
+
+
+# ---------------------------------------------------------------------------
+# 按票面自动填：/api/audit/extract 的回填边界
+# ---------------------------------------------------------------------------
+
+SAMPLES_PDF = PROJECT_ROOT / "finance" / "samples" / "pdf"
+
+
+def test_extract_endpoint_prefills_only_invoice_facts(client, temp_data_dir):
+    """/api/audit/extract 只回"票面上有的"：金额、票面日期、费用类型**推荐**。
+
+    申报信息（申请人/事由/提交日期/人数/晚数）**一律不得出现在响应里** ——
+    给了默认值就等于替申请人编申报数据（同「提交日期不设默认值」的理由）。
+    白名单断言锁死返回字段集，多加一个字段都会在这里被拦下问一句"这是票面有的吗"。
+    """
+    pdf = SAMPLES_PDF / "S01_hotel_ok.pdf"
+    if not pdf.is_file():
+        pytest.skip("样本票缺失")
+    resp = client.post(
+        "/api/audit/extract",
+        json={
+            "filename": "S01_hotel_ok.pdf",
+            "content_b64": base64.b64encode(pdf.read_bytes()).decode(),
+        },
+    )
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["invoice"]["total"] == 1650.00
+    assert d["invoice"]["issue_date"] is not None      # 票面日期：票面有的
+    assert d["suggest"]["expense_type"] == "住宿费"     # 推荐，不是替人决定
+    # 字段白名单：只许有票面事实 + 推荐，别的一个都不给
+    assert set(d["invoice"].keys()) == {
+        "invoice_type", "invoice_number", "issue_date", "seller_name",
+        "item_name", "tax_rate", "total",
+    }
+    assert set(d["suggest"].keys()) == {"expense_type", "source"}
+    # 抽取不建单、不落盘（临时文件即用即删）
+    assert not (temp_data_dir / "uploads").exists()
+
+
+def test_extract_endpoint_reports_failure_as_422_not_500(client):
+    """抽不出来是可预期的（版式不支持/文件损坏）——422 人话，不是 500。"""
+    resp = client.post(
+        "/api/audit/extract",
+        json={"filename": "x.pdf", "content_b64": base64.b64encode(b"not a pdf").decode()},
+    )
+    assert resp.status_code == 422
+    assert "手工填写" in resp.json()["detail"]

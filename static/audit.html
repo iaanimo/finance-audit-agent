@@ -250,21 +250,36 @@
         </div>
 
         <div class="row2">
-          <div><label>费用类型</label><input type="text" id="expense_type" value="住宿费"></div>
+          <div><label>费用类型</label>
+            <!-- 分类下拉：附加字段按类型显隐（见 applyFieldVisibility），表单不再是大杂烩 -->
+            <select id="expense_type">
+              <option>住宿费</option><option>餐饮费</option><option>市内交通费</option>
+              <option>差旅费</option><option>会议费</option><option>办公用品</option>
+              <option>通讯费</option><option>其他费用</option>
+            </select>
+          </div>
           <div><label>申请金额</label><input type="text" id="amount" value="1650.00"></div>
         </div>
 
         <label>事由</label>
         <input type="text" id="reason" value="上海客户现场支持">
 
-        <div class="row2">
-          <div><label>提交日期</label><input type="date" id="submit_date" value="2026-09-18"></div>
+        <label>提交日期</label>
+        <input type="date" id="submit_date" value="2026-09-18">
+
+        <!-- 附加字段按费用类型显隐，**隐藏即清空** —— 免得看不见的旧值溜进申报 -->
+        <div class="row2" id="grpHotel">
           <div><label>住宿城市</label><input type="text" id="city" value="上海"></div>
+          <div><label>住宿晚数</label><input type="number" id="nights" value="3" min="0"></div>
         </div>
 
-        <div class="row2">
-          <div><label>住宿晚数</label><input type="number" id="nights" value="3" min="0"></div>
+        <div class="row2" id="grpMeal" style="display:none">
           <div><label>用餐人数</label><input type="number" id="headcount" min="0" placeholder="餐饮费必填"></div>
+        </div>
+
+        <div id="grpOffice" style="display:none">
+          <label style="font-size:12px"><input type="checkbox" id="has_itemized_list">
+            已附采购清单（超 2000 元必附，否则转人工复核）</label>
         </div>
 
         <button class="primary" id="runBtn">提交审核</button>
@@ -285,7 +300,7 @@
     <div class="card"><div class="empty">
       <div class="big">🧾</div>
       选择一张样本票，点「提交审核」<br>
-      <span style="font-size:12px">审核结论由 17 条规则逐条算出，不经模型判断</span>
+      <span style="font-size:12px">审核结论由 18 条规则逐条算出，不经模型判断</span>
     </div></div>
   </div>
 
@@ -368,15 +383,57 @@ el('sampleSel').addEventListener('change', function () {
   el('manualNotice').style.display = 'none';   // 选了样本，撤掉手动上传的提示
   el('sampleHint').innerHTML =
     '预期命中：<b>' + esc(opt.dataset.expects || '—') + '</b>';
+  applyFieldVisibility();   // 样本的费用类型决定显示哪些附加字段
 });
 
 el('fileInput').addEventListener('change', function () {
   if (this.files && this.files.length) {
     el('sampleSel').value = '';
-    el('fileHint').textContent = '已选择：' + this.files[0].name;
+    el('fileHint').textContent = '已选择：' + this.files[0].name + '（读取票面中…）';
     clearRequestForm();
+    autoFillFromInvoice(this.files[0]);
   }
 });
+
+/* 按票面自动填 —— **只填票面上有的**：申请金额（价税合计）、费用类型（按票面项目名推荐）。
+ *
+ * 申请人、事由、提交日期、人数、晚数是**申报信息** —— 票面上没有，
+ * 系统给默认值就等于替申请人编申报数据（同「提交日期不设默认值」的理由），
+ * 一律留空，让人如实填。费用类型只是**推荐**（复用判定层的关键词归类），
+ * 申请人可改，判定仍以最终提交的为准。
+ */
+function autoFillFromInvoice(file) {
+  readFileAsBase64(file).then(function (inv) {
+    return fetch('/api/audit/extract', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: inv.name, content_b64: inv.b64 })
+    });
+  }).then(function (r) {
+    return r.json().then(function (d) {
+      if (!r.ok) throw new Error(d.detail || '抽取失败');
+      return d;
+    });
+  }).then(function (d) {
+    if (d.invoice && d.invoice.total != null) {
+      el('amount').value = Number(d.invoice.total).toFixed(2);
+    }
+    var sug = (d.suggest && d.suggest.expense_type) || '';
+    if (sug) {
+      var sel = el('expense_type');
+      for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === sug) { sel.value = sug; break; }
+      }
+    }
+    applyFieldVisibility();
+    el('fileHint').textContent = '已选择：' + file.name +
+      '　已按票面填：申请金额' + (sug ? '、费用类型（推荐' + sug + '，可改）' : '') +
+      ' —— 申报信息请如实填写';
+  }).catch(function (e) {
+    el('fileHint').textContent = '已选择：' + file.name +
+      '（票面自动抽取失败：' + e.message + '，请对照票面手工填写）';
+  });
+}
 
 /* 手动上传时清空申请单 —— 防呆。
  *
@@ -395,7 +452,31 @@ function clearRequestForm() {
    'submit_date']
     .forEach(function (id) { var e = el(id); if (e) e.value = ''; });
   el('manualNotice').style.display = 'block';
+  applyFieldVisibility();   // 清空后附加字段全收起（费用类型已空）
 }
+
+/* 按费用类型显隐附加字段 —— 表单不再是"差旅+酒店+餐饮"的大杂烩：
+ * 住宿费只见城市/晚数，餐饮费只见人数，办公用品只见清单勾选，其余不出现。
+ * **隐藏即清空**：看不见的旧值最容易溜进申报（同「防带旧值提交」的理由）。
+ */
+function setGroup(id, show, fieldIds) {
+  var g = el(id); if (!g) return;
+  g.style.display = show ? '' : 'none';
+  if (!show) fieldIds.forEach(function (fid) {
+    var e = el(fid);
+    if (!e) return;
+    if (e.type === 'checkbox') e.checked = false; else e.value = '';
+  });
+}
+
+function applyFieldVisibility() {
+  var t = String(el('expense_type').value || '');
+  setGroup('grpHotel', t === '住宿费', ['city', 'nights']);
+  setGroup('grpMeal', t === '餐饮费', ['headcount']);
+  setGroup('grpOffice', t === '办公用品', ['has_itemized_list']);
+}
+
+el('expense_type').addEventListener('change', applyFieldVisibility);
 
 /* 提交前必填校验 —— 防呆的另一半。
  *
@@ -485,7 +566,7 @@ el('runBtn').addEventListener('click', function () {
           city: el('city').value,
           nights: el('nights').value,
           headcount: el('headcount').value,
-          has_itemized_list: false
+          has_itemized_list: el('has_itemized_list') ? el('has_itemized_list').checked : false
         }
       })
     });

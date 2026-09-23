@@ -228,6 +228,78 @@ async def audit_run(req: AuditRunRequest):
     return result.to_json_dict()
 
 
+class ExtractRequest(BaseModel):
+    filename: str = Field(default="", description="原始文件名，用于后缀判断")
+    content_b64: str = Field(default="", description="发票文件的 base64 内容")
+
+
+@app.post("/api/audit/extract")
+async def audit_extract(req: ExtractRequest):
+    """只抽取、不建单 —— 给页面做「按票面自动填」用。
+
+    **回填边界（防呆红线）**：只回"票面上有的"（金额、票面日期、费用类型**推荐**）。
+    申请人、事由、提交日期、人数、晚数这些**申报信息一律不给默认值** ——
+    给了就等于替申请人编申报数据（同「提交日期不设默认值」的理由）。
+    """
+    if not req.content_b64:
+        raise HTTPException(status_code=400, detail="发票内容为空。")
+    try:
+        blob = base64.b64decode(req.content_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="发票内容不是合法的 base64。")
+    if len(blob) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="发票文件过大（上限 8MB）。")
+    suffix = Path(req.filename).suffix.lower() or ".pdf"
+    if suffix not in _ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型：{suffix}")
+
+    import tempfile
+    from datetime import date
+
+    from finance.extractor import extract
+    from finance.policy import load_policy_bundle
+    from finance.rules import RuleContext, _resolved_expense_type
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+            fh.write(blob)
+            tmp_path = Path(fh.name)
+        invoice = extract(tmp_path)
+    except Exception as exc:  # noqa: BLE001 —— 抽取失败是可预期的，422 人话不是 500
+        raise HTTPException(
+            status_code=422, detail=f"未能从票面抽取到字段：{exc}。请对照票面手工填写。"
+        )
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)   # 临时文件即用即删，不留孤儿
+
+    # 费用类型**推荐**：复用判定层的关键词归类（rules._resolved_expense_type）——
+    # 页面只是预选，申请人可改；判定仍以最终提交的为准。
+    policy = load_policy_bundle()
+    ctx = RuleContext(
+        invoice=invoice,
+        request=ReimbursementRequest(
+            expense_type="", amount="1", submit_date=date.today()
+        ),
+        policy=policy,
+    )
+    resolved, source = _resolved_expense_type(ctx)
+
+    return {
+        "invoice": {
+            "invoice_type": invoice.invoice_type,
+            "invoice_number": invoice.invoice_number,
+            "issue_date": invoice.issue_date.isoformat() if invoice.issue_date else None,
+            "seller_name": invoice.seller_name,
+            "item_name": invoice.item_name,
+            "tax_rate": invoice.tax_rate,
+            "total": float(invoice.total) if invoice.total is not None else None,
+        },
+        "suggest": {"expense_type": resolved or "", "source": source},
+    }
+
+
 @app.get("/api/audit/{audit_id}")
 async def audit_detail(audit_id: str):
     return _load_or_404(audit_id).to_json_dict()
