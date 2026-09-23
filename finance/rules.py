@@ -530,8 +530,9 @@ def check_account_mapping(ctx: RuleContext) -> CheckOutcome:
 def check_serial_invoices(ctx: RuleContext) -> CheckOutcome:
     """R012 同日同销售方连号发票 —— 疑似拆单，**只提示不判罪**。
 
-    "连号"的判定窗口取号码差值 <= 2：相邻连号是最典型的拆单特征，
-    放宽到 2 是为了覆盖中间有一张作废发票的情况。
+    "连号"的判定窗口取号码差值 <= ``serial_invoice_max_gap``（默认 2）：
+    相邻连号是最典型的拆单特征，放宽到 2 是为了覆盖中间有一张作废发票的
+    情况。真实拆单若故意隔得更远，可把 rules.yaml 的这个阈值调大。
     """
     issue = ctx.invoice.issue_date
     seller = ctx.invoice.seller_name
@@ -559,6 +560,7 @@ def check_serial_invoices(ctx: RuleContext) -> CheckOutcome:
     except ValueError:
         return _skip(f"发票号码「{number}」非纯数字，跳过连号检测")
 
+    max_gap = int(ctx.policy.limits.get("serial_invoice_max_gap", 2))
     neighbors = ctx.history.find_same_seller_same_date(seller, issue)
     serials = []
     for hit in neighbors:
@@ -566,7 +568,7 @@ def check_serial_invoices(ctx: RuleContext) -> CheckOutcome:
             other = int(hit.invoice_number)
         except (ValueError, TypeError):
             continue
-        if 0 < abs(other - num) <= 2:
+        if 0 < abs(other - num) <= max_gap:
             serials.append(hit)
 
     ev = {
@@ -575,6 +577,7 @@ def check_serial_invoices(ctx: RuleContext) -> CheckOutcome:
         "seller_name": seller,
         "issue_date": issue.isoformat(),
         "serial_neighbors": [h.invoice_number for h in serials],
+        "max_gap": max_gap,
         "expected": "同日同销售方无连号发票",
     }
     if serials:
@@ -587,7 +590,43 @@ def check_serial_invoices(ctx: RuleContext) -> CheckOutcome:
 
 
 def check_voucher_balance(ctx: RuleContext) -> CheckOutcome:
-    """R013 记账凭证借贷必须平衡。"""
+    """R013 记账凭证借贷必须平衡，**且票面三要素必须勾稽**。
+
+    两道检查，缺一不可：
+
+    1. **票面自洽**：不含税金额 + 税额 = 价税合计（三者都在票面上时必查，
+       **精确比较不带容差**）。这道检查直接对票面字段做加法，**不依赖凭证
+       形状** —— 普通发票的凭证是单行写法，借贷相等是恒真式，如果这张网
+       只挂在"凭证借贷平衡"上，普票的自相矛盾就永远抓不到。
+    2. **凭证借贷平衡**：凭证已生成时，借方合计必须精确等于贷方合计。
+
+    历史教训：这张"票面自洽"的网最初是靠「借方拆两行」间接实现的，
+    而拆行现在只对专用发票做（普通发票进项不可抵扣，见 finance/voucher.py）。
+    依赖凭证形状的防线会随会计口径变化漏水，所以直接做加法。
+    """
+    inv = ctx.invoice
+
+    # ---- ① 票面三要素勾稽 ----
+    net, tax, total = inv.amount, inv.tax_amount, inv.total
+    if net is not None and tax is not None and total is not None:
+        computed = parse_money(net) + parse_money(tax)
+        ev_sum = {
+            "field": "票面金额勾稽",
+            "net_amount": float(net),
+            "tax_amount": float(tax),
+            "computed_total": float(computed),
+            "total": float(total),
+            "actual": float(computed),
+            "expected": float(total),
+        }
+        if computed != parse_money(total):
+            return _fail(
+                f"票面金额自相矛盾：不含税 {money_str(net)} 元 + 税额 {money_str(tax)} 元"
+                f" = {money_str(computed)} 元，与价税合计 {money_str(total)} 元不符",
+                **ev_sum,
+            )
+
+    # ---- ② 凭证借贷平衡 ----
     if ctx.voucher is None:
         return _skip("凭证尚未生成，跳过借贷平衡校验")
     debit = ctx.voucher.debit_total
@@ -825,8 +864,10 @@ def _parse_rate(raw: str) -> float | None:
         value = float(m.group(1))
     except (TypeError, ValueError):
         return None
-    if m.group(2) is None and value <= 1:
-        # 没写百分号且小于等于 1，按小数形式理解（0.06 -> 6%）
+    if m.group(2) is None and value < 1:
+        # 没写百分号且**严格小于 1**，按小数形式理解（0.06 -> 6%）。
+        # 边界曾经写错成 `value <= 1`：裸「1」会跟着 0.06 一起走小数逻辑，
+        # 被解析成 100% —— 而小规模减按征收的 1% 是张常见票。
         value *= 100
     return value
 

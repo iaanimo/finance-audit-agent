@@ -315,3 +315,29 @@ def test_page_reads_balance_verdict_from_backend():
     assert html.count("借贷平衡") == 1, (
         "「借贷平衡」出现了不止一次 —— 怀疑又有一处写死的标签"
     )
+
+
+# ---------------------------------------------------------------------------
+# import 不许有副作用
+# ---------------------------------------------------------------------------
+
+
+def test_importing_server_does_not_attach_file_handler():
+    """``import server`` 不许碰真实文件 —— 日志初始化只在 ``main()`` 里做。
+
+    回归背景：server.py 曾在 import 时 ``LOGS_DIR.mkdir`` + ``logging.FileHandler``，
+    测试一 import 就往真实 logs/ 里写；在只读环境（只读挂载、CI 沙箱）里更是
+    直接 PermissionError，整个测试收集都会中断（实测踩过一次，129 条测试
+    一条都没跑起来）。日志是运行期的事，就该在启动时做。
+    """
+    import logging as _logging
+
+    # 只看"挂在 logs/ 里的文件 handler" —— pytest 自己可能往 NUL 挂 handler，
+    # 那不是 import 副作用；真正的回归是 server 模块在 import 时打开真实日志文件
+    offenders = [
+        h
+        for h in _logging.getLogger().handlers
+        if isinstance(h, _logging.FileHandler)
+        and str(getattr(h, "baseFilename", "")).startswith(str(server.LOGS_DIR))
+    ]
+    assert not offenders, f"root logger 挂了 logs/ 里的文件 handler（import 副作用）：{offenders}"

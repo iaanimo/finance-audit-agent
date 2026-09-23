@@ -333,6 +333,13 @@ def render(outcomes: list[SampleOutcome]) -> tuple[str, dict]:
 
 
 def main() -> int:
+    # 报告含 ✅/❌ 等非 GBK 字符，Windows 默认控制台（cp936）print 时会抛
+    # UnicodeEncodeError，整次评测在打印阶段崩掉、报告都来不及写。
+    # 统一按 UTF-8 输出 —— 评测是给人看的，不能死在展示上。
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     parser = argparse.ArgumentParser(description="报销审核规则评测")
     parser.add_argument("--report", type=str, default="", help="把报告写到指定 Markdown 文件")
     args = parser.parse_args()
