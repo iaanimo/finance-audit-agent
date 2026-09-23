@@ -99,6 +99,9 @@ async def run_audit(
     vision_timeout: int = 20,
     narrative_llm: Any = "auto",
     verifier: InvoiceVerifier | None = None,
+    invoice_overrides: dict | None = None,
+    field_changes: list | None = None,
+    confirmed_by: str = "",
 ) -> AuditResult:
     """跑完一遍审核，返回停在 ``pending_review`` 的结果并落盘。
 
@@ -118,6 +121,15 @@ async def run_audit(
     invoice: Invoice = extract(
         invoice_path, use_vision=use_vision, vision_timeout=vision_timeout
     )
+
+    # ---- 人工确认层（AI 预填 + 人工确认 + 留痕）----
+    # 人工核对/修改过的票面字段**以确认后的为准**进入规则引擎；
+    # 每一笔改动 from→to 连同操作人进审计日志 —— 改了什么、谁改的、什么时候改的，
+    # 事后可查。规则引擎拿到的是"人对原件负责过"的票面。
+    if invoice_overrides:
+        invoice = Invoice.model_validate(
+            {**invoice.model_dump(mode="json"), **invoice_overrides}
+        )
     result = AuditResult(
         invoice=invoice, request=request, state=AuditState.EXTRACTED
     )
@@ -130,6 +142,15 @@ async def run_audit(
             "invoice_number": invoice.invoice_number,
         },
     )
+    if invoice_overrides or field_changes:
+        store.append_log(
+            result.audit_id,
+            {
+                "event": "prefill_confirmed",
+                "confirmed_by": confirmed_by,
+                "changes": field_changes or [],
+            },
+        )
 
     history = store.history_view()
 

@@ -239,6 +239,22 @@
           金额、人数、晚数这类字段若与票面不符，会直接改变审核结论。
         </div>
 
+        <!-- 票面确认卡：AI 预填 + 人工确认 + 留痕（手动上传后出现）。
+             绿=高置信可一键确认；黄=需人工核对；红=字段冲突必须按原件更正；
+             关键三项（金额/税号/号码）必须逐项勾"已核对原件"才能提交。 -->
+        <div id="confirmCard" style="display:none; margin:10px 0; padding:10px; border:1px solid var(--line); border-radius:6px; background:#fafbff">
+          <div style="display:flex; justify-content:space-between; align-items:center">
+            <b style="font-size:13px">票面确认（AI 预填，请逐项核对原件）</b>
+            <button class="ghost" id="confirmHighBtn" style="font-size:12px">一键确认绿色字段</button>
+          </div>
+          <div id="confirmRows" style="margin-top:8px"></div>
+          <div style="margin-top:8px; border-top:1px dashed var(--line); padding-top:8px">
+            <label style="font-size:12px"><input type="checkbox" class="critChk"> 金额已与原件核对</label>
+            <label style="font-size:12px; margin-left:8px"><input type="checkbox" class="critChk"> 税号已与原件核对</label>
+            <label style="font-size:12px; margin-left:8px"><input type="checkbox" class="critChk"> 号码已与原件核对</label>
+          </div>
+        </div>
+
         <div class="row2">
           <div><label>申请人</label><input type="text" id="applicant" value="张三"></div>
           <div><label>所属部门</label>
@@ -280,6 +296,16 @@
         <div id="grpOffice" style="display:none">
           <label style="font-size:12px"><input type="checkbox" id="has_itemized_list">
             已附采购清单（超 2000 元必附，否则转人工复核）</label>
+        </div>
+
+        <!-- 申报扩展信息：全部人工填/确认（票面没有这些） -->
+        <div class="row2">
+          <div><label>归属项目</label><input type="text" id="project" placeholder="选填"></div>
+          <div><label>成本中心</label><input type="text" id="cost_center" placeholder="选填"></div>
+        </div>
+        <div class="row2">
+          <div><label>分摊比例</label><input type="text" id="allocation_ratio" placeholder="选填，如 50%"></div>
+          <div><label>备注</label><input type="text" id="note" placeholder="选填"></div>
         </div>
 
         <button class="primary" id="runBtn">提交审核</button>
@@ -383,6 +409,7 @@ el('sampleSel').addEventListener('change', function () {
   el('manualNotice').style.display = 'none';   // 选了样本，撤掉手动上传的提示
   el('sampleHint').innerHTML =
     '预期命中：<b>' + esc(opt.dataset.expects || '—') + '</b>';
+  el('confirmCard').style.display = 'none'; invoiceBaseline = null;  // 样本是合成可信数据，不过确认卡
   applyFieldVisibility();   // 样本的费用类型决定显示哪些附加字段
 });
 
@@ -415,6 +442,7 @@ function autoFillFromInvoice(file) {
       return d;
     });
   }).then(function (d) {
+    renderConfirmCard(d);   // 票面确认卡：全量票面事实 + 置信度色标
     if (d.invoice && d.invoice.total != null) {
       el('amount').value = Number(d.invoice.total).toFixed(2);
     }
@@ -433,6 +461,102 @@ function autoFillFromInvoice(file) {
     el('fileHint').textContent = '已选择：' + file.name +
       '（票面自动抽取失败：' + e.message + '，请对照票面手工填写）';
   });
+}
+
+/* ---------------- 票面确认卡（AI 预填 + 人工确认 + 留痕） ----------------
+ *
+ * 置信度色标（后端 assess_confidence 确定性判定，零模型）：
+ *   绿 high     —— 结构化来源抽到的完整字段，可一键确认
+ *   黄 low      —— 视觉/OCR 抽取**一律黄**：OCR 有误差，必须人工核对
+ *   红 conflict —— 字段间对不上（大小写金额/三要素勾稽），必须按原件更正
+ *   灰 missing  —— 没抽到，人工补
+ *
+ * 关键三项（金额/税号/号码）必须逐项勾"已核对原件" —— 服务端对修改强拦：
+ * 改可以改，改了要对原件负责（声明 + from/to 全程留痕进审计日志）。
+ */
+var INVOICE_FIELD_LABELS = {
+  invoice_code: '发票代码', invoice_number: '发票号码', invoice_type: '发票类型',
+  issue_date: '开票日期', buyer_name: '购买方名称', buyer_tax_id: '购买方税号',
+  seller_name: '销售方名称', seller_tax_id: '销售方税号', item_name: '商品/服务',
+  amount: '金额（不含税）', tax_rate: '税率', tax_amount: '税额', total: '价税合计',
+  total_in_words: '价税合计大写', remark: '备注'
+};
+var NULLABLE_FIELDS = ['issue_date', 'amount', 'tax_amount', 'total'];
+var CONF_STYLE = {
+  high: { c: '#1a7f37', bg: '#e6f4ea', t: '高置信 · 可一键确认' },
+  low: { c: '#9a6700', bg: '#fff4ce', t: '需人工核对（OCR/视觉抽取）' },
+  conflict: { c: '#c0392b', bg: '#fdecea', t: '字段冲突 · 必须按原件更正' },
+  missing: { c: '#666', bg: '#eee', t: '缺失 · 人工补' },
+  edited: { c: '#1a7f37', bg: '#e6f4ea', t: '已人工确认/更正（留痕）' }
+};
+var invoiceBaseline = null;   // 抽取原值 —— diff 留痕的"from"
+
+function markRow(input, key) {
+  var s = CONF_STYLE[key];
+  input.dataset.conf = key;
+  input.style.borderLeftColor = s.c;
+  input.style.background = s.bg;
+  var tag = input.parentNode.querySelector('.confTag');
+  if (tag) { tag.textContent = s.t; tag.style.color = s.c; }
+}
+
+function renderConfirmCard(d) {
+  invoiceBaseline = d.invoice || {};
+  var conf = d.confidence || {};
+  var critical = d.critical_fields || [];
+  var html = '';
+  Object.keys(INVOICE_FIELD_LABELS).forEach(function (f) {
+    var st = conf[f] || 'missing';
+    var s = CONF_STYLE[st];
+    var v = d.invoice[f] == null ? '' : d.invoice[f];
+    html += '<div class="row2" style="align-items:center">' +
+      '<div style="font-size:12px">' + (critical.indexOf(f) >= 0 ? '🔴 ' : '') +
+      INVOICE_FIELD_LABELS[f] + '</div>' +
+      '<div><input type="text" id="inv_' + f + '" value="' + esc(String(v)) + '" ' +
+      'style="font-size:12px;border-left:4px solid ' + s.c + ';background:' + s.bg + '">' +
+      '<div class="confTag" style="font-size:10px;color:' + s.c + '">' + s.t + '</div></div></div>';
+  });
+  el('confirmRows').innerHTML = html;
+  Object.keys(INVOICE_FIELD_LABELS).forEach(function (f) {
+    var input = el('inv_' + f);
+    if (!input) return;
+    input.dataset.conf = conf[f] || 'missing';
+    input.addEventListener('change', function () { markRow(this, 'edited'); });
+  });
+  el('confirmCard').style.display = '';
+}
+
+el('confirmHighBtn').addEventListener('click', function () {
+  if (!invoiceBaseline) return;
+  Object.keys(INVOICE_FIELD_LABELS).forEach(function (f) {
+    var input = el('inv_' + f);
+    if (input && input.dataset.conf === 'high') markRow(input, 'edited');
+  });
+  toast('绿色字段已确认；黄色/红色仍需逐项人工处理');
+});
+
+function collectInvoiceConfirm() {
+  var overrides = {}, changes = [];
+  if (invoiceBaseline) {
+    Object.keys(INVOICE_FIELD_LABELS).forEach(function (f) {
+      var input = el('inv_' + f);
+      if (!input) return;
+      var now = input.value.trim();
+      var was = invoiceBaseline[f] == null ? '' : String(invoiceBaseline[f]);
+      if (now !== was) {
+        overrides[f] = (now === '' && NULLABLE_FIELDS.indexOf(f) >= 0) ? null : now;
+        changes.push({ field: f, from: was, to: now });
+      }
+    });
+  }
+  var chks = document.querySelectorAll('.critChk');
+  var criticalOk = true;
+  Array.prototype.forEach.call(chks, function (c) { if (!c.checked) criticalOk = false; });
+  return {
+    overrides: overrides, changes: changes,
+    critical_confirmed: invoiceBaseline ? criticalOk : true,
+    confirmed_by: el('applicant').value
+  };
 }
 
 /* 手动上传时清空申请单 —— 防呆。
@@ -505,6 +629,26 @@ function describeFormProblem() {
       if (!isFinite(n) || n <= 0) return '申请金额必须是一个大于 0 的数字';
     }
   }
+  // ---- 票面确认卡的门槛（页面拦即时反馈；服务端对关键字段声明还有一道）----
+  if (invoiceBaseline) {
+    var prob = '';
+    Object.keys(INVOICE_FIELD_LABELS).forEach(function (f) {
+      if (prob) return;
+      var input = el('inv_' + f);
+      if (!input) return;
+      var st = input.dataset.conf;
+      if (st === 'conflict') prob = '「' + INVOICE_FIELD_LABELS[f] + '」字段冲突，请按原件更正';
+      else if (st === 'low' || st === 'missing') {
+        if (st === 'low') prob = '「' + INVOICE_FIELD_LABELS[f] + '」需人工核对（点击修改或确认）';
+      }
+    });
+    if (prob) return prob;
+    var allChecked = true;
+    Array.prototype.forEach.call(document.querySelectorAll('.critChk'), function (c) {
+      if (!c.checked) allChecked = false;
+    });
+    if (!allChecked) return '关键字段（金额/税号/号码）须逐项勾选「已与原件核对」';
+  }
   return '';
 }
 
@@ -546,6 +690,7 @@ el('runBtn').addEventListener('click', function () {
     return;   // 不发请求 —— 后端也会拦，但没必要先制造一张废单
   }
   var btn = this;
+  var conf = collectInvoiceConfirm();
   getInvoice().then(function (inv) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner">◐</span> 审核中…';
@@ -556,6 +701,10 @@ el('runBtn').addEventListener('click', function () {
         filename: inv.name,
         content_b64: inv.b64,
         use_vision: false,
+        invoice_overrides: conf.overrides,
+        field_changes: conf.changes,
+        critical_confirmed: conf.critical_confirmed,
+        confirmed_by: conf.confirmed_by,
         request: {
           applicant: el('applicant').value,
           department: el('department').value,
@@ -566,7 +715,11 @@ el('runBtn').addEventListener('click', function () {
           city: el('city').value,
           nights: el('nights').value,
           headcount: el('headcount').value,
-          has_itemized_list: el('has_itemized_list') ? el('has_itemized_list').checked : false
+          has_itemized_list: el('has_itemized_list') ? el('has_itemized_list').checked : false,
+          project: el('project').value,
+          cost_center: el('cost_center').value,
+          allocation_ratio: el('allocation_ratio').value,
+          note: el('note').value
         }
       })
     });

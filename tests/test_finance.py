@@ -1765,3 +1765,94 @@ def test_decide_respects_operator_directory(tmp_path):
 
     decide(result, Decision.REJECTED, "李四", store=store, directory=NoSelfService())
     assert store.load(result.audit_id).operator == "李四"
+
+
+# ==========================================================================
+# 三轮加固：AI 预填 + 人工确认 + 留痕 / XML·OFD 直取 / 置信度标注
+# ==========================================================================
+
+
+def test_prefill_overrides_enter_rules_with_change_log(tmp_path):
+    """人工确认后的票面**以确认值进规则引擎**，且每笔改动 from→to 进审计日志。
+
+    这是「AI 预填 + 人工确认 + 留痕」的落点：改了什么、谁改的、什么时候改的，
+    事后可查；规则引擎拿到的是"人对原件负责过"的票面。
+    """
+    pdf = SAMPLES_PDF / "S01_hotel_ok.pdf"
+    if not pdf.is_file():
+        pytest.skip("样本票缺失")
+    store = AuditStore(base_dir=tmp_path)
+
+    async def _run():
+        return await run_audit(
+            pdf, make_request(), store=store, narrative_llm=None,
+            invoice_overrides={"total": "2000.00"},
+            field_changes=[{"field": "total", "from": "1650.0", "to": "2000.0"}],
+            confirmed_by="张三",
+        )
+
+    result = asyncio.run(_run())
+    assert result.invoice.total == parse_money("2000.00"), "确认后的票面才是判定依据"
+
+    events = store.read_log(result.audit_id)
+    confirmed = [e for e in events if e["event"] == "prefill_confirmed"]
+    assert len(confirmed) == 1
+    assert confirmed[0]["confirmed_by"] == "张三"
+    assert confirmed[0]["changes"] == [
+        {"field": "total", "from": "1650.0", "to": "2000.0"}
+    ]
+
+
+def test_assess_confidence_flags_vision_and_conflicts():
+    """置信度标注：视觉抽取一律黄（必人工核对）；字段间冲突标红。"""
+    from finance.extractor import assess_confidence
+
+    inv = make_invoice()
+    inv = inv.model_copy(update={"extraction_method": "vision"})
+    conf = assess_confidence(inv)
+    assert conf["total"] == "low", "视觉/OCR 抽取一律需人工核对"
+
+    inv2 = make_invoice(total="1650.01")   # 大写仍是 1650.00
+    conf2 = assess_confidence(inv2)
+    assert conf2["total"] == "conflict" and conf2["total_in_words"] == "conflict"
+
+    inv3 = make_invoice(amount="1000.00", tax_amount="60.00", total="1200.00",
+                        total_in_words="壹仟贰佰圆整")
+    conf3 = assess_confidence(inv3)
+    assert conf3["amount"] == conf3["tax_amount"] == conf3["total"] == "conflict"
+
+
+def test_extract_from_xml_and_ofd(tmp_path):
+    """电子发票 XML 直接解析；OFD（ZIP 容器）取内嵌 XML 走同一条路。"""
+    import zipfile
+
+    from finance.extractor import extract, extract_from_xml
+
+    xml_text = """<?xml version="1.0" encoding="UTF-8"?>
+<Invoice>
+  <InvoiceNumber>24312000000012345601</InvoiceNumber>
+  <IssueDate>2026-09-15</IssueDate>
+  <BuyerName>示例科技有限公司</BuyerName>
+  <BuyerTaxId>91310000MA1FL2XXXX</BuyerTaxId>
+  <SellerName>上海某某酒店管理有限公司</SellerName>
+  <ItemName>*住宿服务*住宿费</ItemName>
+  <Amount>1556.60</Amount>
+  <TaxRate>6%</TaxRate>
+  <TaxAmount>93.40</TaxAmount>
+  <TotalAmount>1650.00</TotalAmount>
+  <TotalInWords>壹仟陆佰伍拾圆整</TotalInWords>
+</Invoice>"""
+    xp = tmp_path / "e.xml"
+    xp.write_text(xml_text, encoding="utf-8")
+    inv = extract_from_xml(xp)
+    assert inv.extraction_method == "xml"
+    assert inv.invoice_number == "24312000000012345601"
+    assert inv.total == parse_money("1650.00")
+    assert inv.buyer_tax_id == "91310000MA1FL2XXXX"
+
+    op = tmp_path / "e.ofd"
+    with zipfile.ZipFile(op, "w") as zf:
+        zf.writestr("Doc/InvoiceData.xml", xml_text)
+    inv2 = extract(op)
+    assert inv2.extraction_method == "ofd"
+    assert inv2.invoice_number == inv.invoice_number
