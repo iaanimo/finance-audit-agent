@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice>
+  <InvoiceType>INVOICE</InvoiceType>
+  <InvoiceNumber>INV-2026-0001</InvoiceNumber>
+  <IssueDate>2026-09-15</IssueDate>
+  <BuyerName>示例科技有限公司</BuyerName>
+  <SellerName>Overseas Supplier Co., Ltd.</SellerName>
+  <ItemName>*技术服务*技术服务费</ItemName>
+  <TotalAmount>2000.00</TotalAmount>
+  <Remark>示例样本，非真实票据 —— 仅供软件测试使用</Remark>
+</Invoice>

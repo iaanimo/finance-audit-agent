@@ -71,6 +71,9 @@ def temp_data_dir(tmp_path, monkeypatch):
             self.data_dir = root / "data"
 
     monkeypatch.setattr("tools.file_ops.get_settings", lambda: _FakeSettings())
+    # A1：AUDIT_STORE 的默认目录走 config.settings —— 不 patch 这里，
+    # reset 测试会把**真实 data/audits 清空**（实测发生过，conftest 的承诺曾不成立）
+    monkeypatch.setattr("config.settings.get_settings", lambda: _FakeSettings())
     return root / "data"
 
 
@@ -381,7 +384,9 @@ def test_extract_endpoint_prefills_only_invoice_facts(client, temp_data_dir):
     }
     assert set(d["confidence"].keys()) == set(d["invoice"].keys())
     assert d["confidence"]["total"] == "high"          # PDF 文本层结构化抽取
-    assert set(d["critical_fields"]) == {"total", "buyer_tax_id", "invoice_number"}
+    assert set(d["critical_fields"]) == {
+        "total", "buyer_tax_id", "invoice_number", "invoice_type",
+    }
     assert set(d.keys()) == {"invoice", "confidence", "critical_fields", "suggest"}
     # 申报信息（申请人/事由/提交日期/人数/晚数）不得出现在返回里 —— 票面没有，不许替人编
     # 抽取不建单、不落盘（临时文件即用即删）
@@ -418,3 +423,19 @@ def test_critical_field_change_requires_original_declaration(client):
     resp = client.post("/api/audit/run", json=body)
     assert resp.status_code == 400
     assert "核对原件" in resp.json()["detail"]
+
+
+def test_sample_endpoint_serves_all_manifest_samples(client):
+    """取样接口必须服务**清单里的每一个样本**（含非 pdf 的 xml 票据）——
+    消费方纪律：评测直读文件、界面走本接口，两处同一路径源。
+    曾经接口硬编码 pdf/{key}.pdf，新样本在界面上"选了必炸"而评测全绿。"""
+    listing = client.get("/api/audit/samples").json()["samples"]
+    keys = [s["key"] for s in listing]
+    assert "S12_train_ticket" in keys and "S14_fixed_voucher" in keys
+    assert keys.index("S02_hotel_over_limit") < keys.index("S12_train_ticket"), (
+        "样本按清单顺序展示，编号顺序不许被打断"
+    )
+    for s in listing:
+        resp = client.get(f"/api/audit/sample/{s['key']}")
+        assert resp.status_code == 200, f"{s['key']} 取样失败"
+        assert len(resp.content) > 0

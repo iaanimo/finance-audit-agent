@@ -173,12 +173,28 @@ async def audit_samples():
 
 @app.get("/api/audit/sample/{key}")
 async def audit_sample_file(key: str):
-    """取一张样本票的 PDF 原文（前端转 base64 后回传，模拟"上传"）。"""
+    """取一张样本票的原文（前端转 base64 后回传，模拟"上传"）。
+
+    **按清单取文件**，不再硬编码 ``pdf/{key}.pdf`` —— 那个写死曾让 xml/ 票据
+    样本在界面上"选了必炸"：评测直读文件全绿、界面走本接口 404，两套口径打架。
+    （消费方清单纪律：样本的消费方 = 评测（直读）+ 本接口（界面），同一路径源。）
+    """
     safe = "".join(ch for ch in key if ch.isalnum() or ch in "-_")
-    path = SAMPLE_DIR / "pdf" / f"{safe}.pdf"
+    spec: dict = {}
+    manifest_path = SAMPLE_DIR / "samples.yaml"
+    if manifest_path.is_file():
+        import yaml
+
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        spec = manifest.get(safe) or {}
+    rel = str(spec.get("pdf") or "")
+    path = (SAMPLE_DIR / rel).resolve() if rel else (SAMPLE_DIR / "pdf" / f"{safe}.pdf").resolve()
+    # 防目录穿越：清单被改坏/塞进 ../ 时也跳不出 samples/（双保险）
+    if not str(path).startswith(str(SAMPLE_DIR.resolve()) + "\\") and path.parent != SAMPLE_DIR.resolve():
+        raise HTTPException(status_code=404, detail=f"样本不存在：{key}")
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"样本不存在：{key}")
-    return FileResponse(path, media_type="application/pdf", filename=f"{safe}.pdf")
+    return FileResponse(path, filename=path.name)
 
 
 # ---------------------------------------------------------------------------
@@ -216,14 +232,34 @@ async def audit_run(req: AuditRunRequest):
     # 反过来的话，一张缺字段的废单会先把文件写进 data/uploads/ 再被 400 拒掉，
     # 留下一个没人引用的孤儿文件。
 
-    # 关键字段（金额/税号/发票号码）被人工改过的，必须带"已逐项核对原件"声明。
-    # 服务端自己核不了原件，但**可以让人工留下可追责的声明** —— 这是留痕精神：
-    # 改可以改，改了要有人对原件负责。
-    _CRITICAL = {"total", "buyer_tax_id", "invoice_number"}
-    if any(c.get("field") in _CRITICAL for c in req.field_changes) and not req.critical_confirmed:
+    # 关键字段（金额/税号/发票号码/**发票类型**）被人工改过的，必须带"已逐项核对原件"
+    # 声明。服务端自己核不了原件，但**可以让人工留下可追责的声明** —— 留痕精神：
+    # 改可以改，改了要有人对原件负责。字段名小写规范化再比（大小写变形不许绕过），
+    # 且**以 invoice_overrides 实际内容为准**（B2：不看客户端自报的 field_changes）。
+    from finance.extractor import CRITICAL_FIELDS
+    from finance.models import Invoice as _InvoiceModel
+
+    _known = {name.lower() for name in _InvoiceModel.model_fields}
+    _touched = {str(k).strip().lower() for k in req.invoice_overrides}
+    unknown = sorted(_touched - _known)
+    if unknown:
+        raise HTTPException(
+            status_code=400, detail=f"invoice_overrides 含未知票面字段：{unknown}"
+        )
+    # 证据链元数据（来源文件/原文/抽取方式）**不接受申报口覆盖** ——
+    # extraction_method 改一下就能伪造置信度等级（B2 残留教训）。
+    # 它们记录"数据从哪来"，要更正只能走抽取层并留痕。
+    _protected = {"source_file", "raw_text", "extraction_method"}
+    hit = _touched & _protected
+    if hit:
         raise HTTPException(
             status_code=400,
-            detail="修改了关键字段（金额/税号/发票号码），必须勾选「已逐项核对原件」——改可以改，改了要对原件负责并留痕。",
+            detail=f"证据链元数据（{sorted(hit)}）不可由申报口覆盖 —— 记录的是数据来源，更正须走抽取层。",
+        )
+    if (_touched & set(CRITICAL_FIELDS)) and not req.critical_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="修改了关键字段（金额/税号/发票号码/发票类型），必须勾选「已逐项核对原件」——改可以改，改了要对原件负责并留痕。",
         )
 
     try:

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Ticket>
+  <BillType>定额发票</BillType>
+  <BillNumber>24312000000077777714</BillNumber>
+  <IssueDate>2026-09-15</IssueDate>
+  <BuyerName>示例科技有限公司</BuyerName>
+  <SellerName>某某市出租汽车有限公司</SellerName>
+  <ItemName>*运输服务*出租车费</ItemName>
+  <TotalAmount>100.00</TotalAmount>
+  <Remark>示例样本，非真实票据 —— 仅供软件测试使用</Remark>
+</Ticket>

@@ -21,6 +21,13 @@ if not exist ".venv\Scripts\python.exe" (
 
 if not exist "logs" mkdir logs
 
+REM 防呆：先停掉可能残留的旧服务。stale 进程带着**旧路由表**跑新页面
+REM （静态文件即时生效、后端路由启动时加载），表现为莫名的 405/404。
+for /f "tokens=5" %%p in ('netstat -ano ^| findstr :8000 ^| findstr LISTENING') do (
+    taskkill /F /PID %%p >nul 2>&1
+)
+timeout /t 1 /nobreak >nul
+
 echo   审核台: http://127.0.0.1:8000/audit
 echo.
 echo   本脚本以【演示模式】启动（--demo），页面上会出现「清空演示数据」按钮。

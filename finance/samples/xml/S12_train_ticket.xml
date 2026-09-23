@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Ticket>
+  <BillType>铁路电子客票</BillType>
+  <BillNumber>24312000000088888812</BillNumber>
+  <IssueDate>2026-09-15</IssueDate>
+  <BuyerName>示例科技有限公司</BuyerName>
+  <SellerName>中国铁路某某局集团有限公司</SellerName>
+  <ItemName>*运输服务*铁路旅客运输</ItemName>
+  <TotalAmount>550.00</TotalAmount>
+  <Remark>示例样本，非真实票据 —— 仅供软件测试使用</Remark>
+</Ticket>

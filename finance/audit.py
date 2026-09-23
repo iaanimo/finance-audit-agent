@@ -7,7 +7,7 @@
 为什么要这么严：状态变更意味着"这张单子往前走了一步"。如果到处都能改状态，
 演示时你就答不上来"这一步是谁触发的"。收敛到一个入口，责任才清楚。
 
-流程（六态状态机，每一态都对应真实发生的一件事）
+流程（八态状态机：系统推进六步 + 人工两终态，每一态都对应真实发生的一件事）
 ------------------------------------------------
 
     抽取 extract          -> extracted
@@ -60,7 +60,7 @@ from .voucher import VoucherError, build_voucher
 STAGE_VALIDATE = [
     "R001", "R002", "R003", "R005", "R006",
     "R007", "R008", "R009", "R010", "R011",
-    "R015", "R016", "R017", "R018",
+    "R015", "R016", "R017", "R018", "R019",
 ]
 STAGE_HISTORY = ["R004", "R012"]
 STAGE_BUDGET = ["R014"]
@@ -124,12 +124,24 @@ async def run_audit(
 
     # ---- 人工确认层（AI 预填 + 人工确认 + 留痕）----
     # 人工核对/修改过的票面字段**以确认后的为准**进入规则引擎；
-    # 每一笔改动 from→to 连同操作人进审计日志 —— 改了什么、谁改的、什么时候改的，
-    # 事后可查。规则引擎拿到的是"人对原件负责过"的票面。
+    # 留痕的 from→to 由**服务端自算**（from = 抽取基准，to = 确认值）——
+    # 不信客户端自报的 field_changes（B2：闸门不自证，客户端说"没改"不算数）。
+    # 证据链元数据不接受覆盖（库层再滤一道，服务端另有一道 400）：
+    # extraction_method 是置信度的判据、raw_text/source_file 是证据链的根 ——
+    # 申报口改它们 = 抹掉"数据从哪来"（B2 残留教训）。
+    invoice_overrides = {
+        k: v
+        for k, v in (invoice_overrides or {}).items()
+        if k not in {"source_file", "raw_text", "extraction_method"}
+    }
+    baseline = invoice.model_dump(mode="json")
     if invoice_overrides:
-        invoice = Invoice.model_validate(
-            {**invoice.model_dump(mode="json"), **invoice_overrides}
-        )
+        invoice = Invoice.model_validate({**baseline, **invoice_overrides})
+    changes = [
+        {"field": k, "from": baseline.get(k), "to": invoice_overrides[k]}
+        for k in (invoice_overrides or {})
+        if baseline.get(k) != invoice_overrides[k]
+    ]
     result = AuditResult(
         invoice=invoice, request=request, state=AuditState.EXTRACTED
     )
@@ -142,13 +154,13 @@ async def run_audit(
             "invoice_number": invoice.invoice_number,
         },
     )
-    if invoice_overrides or field_changes:
+    if changes:
         store.append_log(
             result.audit_id,
             {
                 "event": "prefill_confirmed",
                 "confirmed_by": confirmed_by,
-                "changes": field_changes or [],
+                "changes": changes,
             },
         )
 

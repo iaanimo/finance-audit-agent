@@ -101,6 +101,9 @@ class CheckOutcome:
     message: str
     evidence: dict[str, Any] = field(default_factory=dict)
     severity_override: Severity | None = None
+    #: True = 本规则**不适用于本单**（N/A）。与"检查过且通过"是两种语义 ——
+    #: （C6 教训：_skip 曾记 PASS 且 applicable=True，"没查"冒充"查了没事"）。
+    na: bool = False
 
 
 def _pass(message: str, **evidence: Any) -> CheckOutcome:
@@ -112,8 +115,13 @@ def _fail(message: str, **evidence: Any) -> CheckOutcome:
 
 
 def _skip(message: str, **evidence: Any) -> CheckOutcome:
-    """规则不适用于本单（不是通过，也不是失败）—— 记 PASS 并注明不适用。"""
-    return CheckOutcome(passed=True, message=message, evidence=evidence)
+    """规则不适用于本单（不是通过，也不是失败）—— 记 **N/A** 并注明原因。
+
+    N/A 与 PASS 必须可区分：财务人员看到绿色"通过"会理解成"查了没问题"，
+    而这里是"没查（不涉及）"。``na=True`` -> finding 层 ``applicable=False``，
+    前端中性色展示、不进"通过 N 条"计数。
+    """
+    return CheckOutcome(passed=True, message=message, evidence=evidence, na=True)
 
 
 def _total_missing(what: str, **evidence: Any) -> CheckOutcome:
@@ -455,6 +463,47 @@ def check_invoice_type(ctx: RuleContext) -> CheckOutcome:
     accepted = ctx.policy.accepted_invoice_types
     actual = ctx.invoice.invoice_type
     ev = {"field": "发票类型", "actual": actual, "expected": accepted}
+
+    # ---- 票种路由：非增值税票不走增值税白名单 ----
+    kind = ctx.policy.ticket_kind(actual)
+    if kind == "transport":
+        return _pass(f"票种「交通票据」按票种核验（类型：{actual or '未标'}）", **ev)
+    if kind == "voucher":
+        # 制度 3.4 **明文"不接受"**的（定额发票/手撕票/收据）：事实性违规 -> FAIL
+        #（"另有规定的除外"走人工推翻留痕）。C1 教训：这票种曾被"按票种核验"
+        # 一句话全放行（PASS -> APPROVED），与制度明文冲突。
+        if any(b in actual for b in ("定额", "手撕", "收据", "手写")):
+            return _fail(
+                f"票据「{actual}」属制度 3.4 明文不接受的类型，不得报销"
+                f"（另有规定的除外，可人工复核留痕）",
+                **ev,
+            )
+        # 其余财政票据（非税收入票据等）制度白名单未列 —— 不判罪，转人工。
+        return CheckOutcome(
+            passed=False,
+            message=f"财政票据「{actual}」不在制度 3.4 白名单内，提交人工复核",
+            evidence=ev,
+            severity_override=Severity.WARN,
+        )
+    if kind == "foreign":
+        return _pass("境外票据不适用增值税票类型白名单（汇率核验见 R019）", **ev)
+    if kind == "other" and actual:
+        # 制度 3.4 **明文"不接受"**的票种（手写收据等）：事实性违规 -> FAIL
+        #（"另有规定的除外"由人工推翻留痕）；认不出的其它票据**不判罪** ->
+        # 强制转人工。两种语义不能混：明文禁止 ≠ 信息不明。
+        if any(b in actual for b in ("手写收据", "收据", "手撕")):
+            return _fail(
+                f"票据「{actual}」属制度 3.4 明文不接受的类型，不得报销"
+                f"（另有规定的除外，可人工复核留痕）",
+                **ev,
+            )
+        return CheckOutcome(
+            passed=False,
+            message=f"非标准票据「{actual}」，不在可接受范围内，强制转人工复核",
+            evidence=ev,
+            severity_override=Severity.WARN,
+        )
+
     if not actual:
         return CheckOutcome(
             passed=False,
@@ -498,8 +547,8 @@ def check_amount_match(ctx: RuleContext) -> CheckOutcome:
         return _total_missing("申请金额是否与票面一致", **ev)
     # **精确比较，不带容差。** 制度 3.5 写的是「必须与发票价税合计**完全一致**」，
     # 会计上还要求账证相符。「申请 1650.01、票面 1650.00」就是不一致，该退回更正。
-    # money_eq 的 1 分容差是给「人均」「每晚」这类除法派生值用的，
-    # 用在这里不是宽容，是把制度悄悄放宽了一分钱。
+    # 「人均」「每晚」这类除法派生值的做法是**量化到分后再精确比较**；
+    # 业务比较零容差，不存在"放宽一分钱"的场合。
     if claimed != total:
         return _fail(
             f"申请金额 {money_str(claimed)} 元与发票价税合计 {money_str(total)} 元不一致",
@@ -916,6 +965,32 @@ def check_invoice_verification(ctx: RuleContext) -> CheckOutcome:
     )
 
 
+def check_foreign_exchange(ctx: RuleContext) -> CheckOutcome:
+    """R019 境外票据需人工核验汇率（票种 foreign 专属，制度 3.10）。
+
+    系统**不做汇率折算、不猜汇率** —— 折算金额必须由人工按报销日汇率核验。
+    这条永远判 WARN 转人工：境外票据的"可疑点"不是违规，是系统能力边界。
+
+    checker 自己复核票种（C3 教训）：scope 过滤是第一道网，但 unknown 票种会
+    放行全部规则 —— 专属规则必须自带适用性判断，否则国内票抽不到类型时
+    会被凭空安上"境外"身份。evidence 的票种也必须是实算值，不许硬编码。
+    """
+    kind = ctx.policy.ticket_kind(ctx.invoice.invoice_type)
+    if kind != "foreign":
+        return _skip("非境外票据，不适用汇率核验", ticket_kind=kind)
+    return CheckOutcome(
+        passed=False,
+        message="境外票据：需人工核验汇率与折算人民币金额（系统不猜汇率），提交人工复核",
+        evidence={
+            "field": "汇率",
+            "actual": ctx.invoice.total,
+            "expected": "人工按报销日汇率核验折算金额",
+            "ticket_kind": kind,
+        },
+        severity_override=Severity.WARN,
+    )
+
+
 # 规则 id -> checker 函数。rules.yaml 的 checker 字段必须能在这里找到。
 CHECKERS: dict[str, Callable[[RuleContext], CheckOutcome]] = {
     "check_buyer_name": check_buyer_name,
@@ -936,6 +1011,7 @@ CHECKERS: dict[str, Callable[[RuleContext], CheckOutcome]] = {
     "check_amount_in_words": check_amount_in_words,
     "check_vat_rate": check_vat_rate,
     "check_invoice_verification": check_invoice_verification,
+    "check_foreign_exchange": check_foreign_exchange,
 }
 
 
@@ -983,6 +1059,21 @@ def _run_one(spec: RuleSpec, ctx: RuleContext, policy: PolicyBundle) -> AuditFin
         "title": spec.title,
         "clause_text": spec.clause_text,
     }
+
+    # ---- 票种路由（rules.yaml 的 rule_scope，**配置不是智能**）----
+    # 非增值税票据（火车票/行程单/定额/境外）票面本没有抬头税号大写金额，
+    # 拿增值税票口径的规则去判就是误杀。不适用 -> N/A（PASS + applicable=False），
+    # 与"检查过且通过"是两种语义，前端分开展示。
+    kind = policy.ticket_kind(ctx.invoice.invoice_type)
+    if not policy.rule_in_scope(spec.rule_id, kind):
+        return AuditFinding(
+            **base,
+            severity=Severity.PASS,
+            message=f"不适用于本单（票种「{kind}」不涉及本规则）",
+            evidence={"ticket_kind": kind, "applicable": False},
+            applicable=False,
+        )
+
     checker = CHECKERS.get(spec.checker)
     if checker is None:
         return AuditFinding(
@@ -1007,7 +1098,8 @@ def _run_one(spec: RuleSpec, ctx: RuleContext, policy: PolicyBundle) -> AuditFin
     if not outcome.passed:
         severity = outcome.severity_override or spec.severity_on_fail
     return AuditFinding(
-        **base, severity=severity, message=outcome.message, evidence=outcome.evidence
+        **base, severity=severity, message=outcome.message, evidence=outcome.evidence,
+        applicable=not outcome.na,
     )
 
 
@@ -1038,10 +1130,12 @@ def summarize_findings(findings: list[AuditFinding]) -> str:
     """
     fails = [f for f in findings if f.severity is Severity.FAIL]
     warns = [f for f in findings if f.severity is Severity.WARN]
-    passes = [f for f in findings if f.severity is Severity.PASS]
+    nas = [f for f in findings if f.severity is Severity.PASS and not f.applicable]
+    passes = [f for f in findings if f.severity is Severity.PASS and f.applicable]
 
     lines = [
         f"共执行 {len(findings)} 条规则：通过 {len(passes)} 条，"
+        f"不适用 {len(nas)} 条（票种/费用类型不涉及），"
         f"不通过 {len(fails)} 条，待人工判断 {len(warns)} 条。"
     ]
     if fails:
@@ -1056,5 +1150,10 @@ def summarize_findings(findings: list[AuditFinding]) -> str:
             lines.append(f"· [{f.rule_id} 制度{f.clause}] {f.message}")
     if not fails and not warns:
         lines.append("")
-        lines.append("全部规则通过，未发现疑点。")
+        if nas:
+            lines.append(
+                f"全部适用规则通过（另有 {len(nas)} 条不适用已注明），未发现疑点。"
+            )
+        else:
+            lines.append("全部规则通过，未发现疑点。")
     return "\n".join(lines)
