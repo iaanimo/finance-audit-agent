@@ -372,12 +372,18 @@ def test_extract_endpoint_prefills_only_invoice_facts(client, temp_data_dir):
     assert d["invoice"]["total"] == 1650.00
     assert d["invoice"]["issue_date"] is not None      # 票面日期：票面有的
     assert d["suggest"]["expense_type"] == "住宿费"     # 推荐，不是替人决定
-    # 字段白名单：只许有票面事实 + 推荐，别的一个都不给
+    # 票面事实全量返回 + 每字段置信度 + 关键字段清单（票面确认卡的数据源）
     assert set(d["invoice"].keys()) == {
-        "invoice_type", "invoice_number", "issue_date", "seller_name",
-        "item_name", "tax_rate", "total",
+        "invoice_code", "invoice_number", "invoice_type", "issue_date",
+        "buyer_name", "buyer_tax_id", "seller_name", "seller_tax_id",
+        "item_name", "amount", "tax_rate", "tax_amount", "total",
+        "total_in_words", "remark",
     }
-    assert set(d["suggest"].keys()) == {"expense_type", "source"}
+    assert set(d["confidence"].keys()) == set(d["invoice"].keys())
+    assert d["confidence"]["total"] == "high"          # PDF 文本层结构化抽取
+    assert set(d["critical_fields"]) == {"total", "buyer_tax_id", "invoice_number"}
+    assert set(d.keys()) == {"invoice", "confidence", "critical_fields", "suggest"}
+    # 申报信息（申请人/事由/提交日期/人数/晚数）不得出现在返回里 —— 票面没有，不许替人编
     # 抽取不建单、不落盘（临时文件即用即删）
     assert not (temp_data_dir / "uploads").exists()
 
@@ -390,3 +396,25 @@ def test_extract_endpoint_reports_failure_as_422_not_500(client):
     )
     assert resp.status_code == 422
     assert "手工填写" in resp.json()["detail"]
+
+
+def test_critical_field_change_requires_original_declaration(client):
+    """改关键字段（金额/税号/号码）必须带「已逐项核对原件」声明 —— 服务端强拦。
+
+    服务端自己核不了原件，但**可以让人工留下可追责的声明**：改可以改，
+    改了要对原件负责。声明缺失 -> 400，且**落盘之前**就拦（不留孤儿文件）。
+    """
+    pdf = SAMPLES_PDF / "S01_hotel_ok.pdf"
+    if not pdf.is_file():
+        pytest.skip("样本票缺失")
+    body = {
+        "filename": "S01_hotel_ok.pdf",
+        "content_b64": base64.b64encode(pdf.read_bytes()).decode(),
+        "request": dict(VALID_FORM),
+        "invoice_overrides": {"total": "1650.01"},
+        "field_changes": [{"field": "total", "from": "1650.0", "to": "1650.01"}],
+        "critical_confirmed": False,
+    }
+    resp = client.post("/api/audit/run", json=body)
+    assert resp.status_code == 400
+    assert "核对原件" in resp.json()["detail"]

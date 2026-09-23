@@ -98,10 +98,18 @@ def extract(
             # PDF 文本层读不出来（扫描件？）—— 抠出内嵌位图再转视觉兜底
             return _extract_pdf_via_vision(p, pdf_exc, vision_timeout)
 
+    # 电子发票的结构化形态：优先直接解析（零 OCR、零模型、零猜）
+    if suffix == ".xml":
+        return extract_from_xml(p)
+    if suffix == ".ofd":
+        return extract_from_ofd(p)
+
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
         return extract_from_image(p, timeout=vision_timeout)
 
-    raise ExtractionError(f"不支持的文件类型: {suffix}（支持 pdf 与常见图片格式）")
+    raise ExtractionError(
+        f"不支持的文件类型: {suffix}（支持 xml / ofd / pdf 与常见图片格式）"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -378,6 +386,179 @@ def _invoice_from_mapping(d: dict[str, Any]) -> Invoice:
         total_in_words=s("total_in_words"),
         remark=s("remark"),
     )
+
+
+# --------------------------------------------------------------------------
+# 结构化直取：电子发票 XML / OFD（零 OCR、零模型）
+# --------------------------------------------------------------------------
+
+
+def extract_from_xml(path: str | Path, source_file: str = "") -> Invoice:
+    """电子发票 XML（数电票 / 开票平台导出）直接解析。
+
+    轻量实现，边界如实说：兼容常见**中英文标签**（标签对不上就抽稀，
+    抽不到的字段由规则引擎判"信息缺失转人工"）；标签语义随开票平台有差异
+    （TotalAmount 有的家是价税合计、有的是不含税），**对不上的会被 R013
+    的三要素勾稽抓出来标冲突**，由人工按原件更正 —— 不猜。
+    """
+    p = Path(path)
+    return _parse_invoice_xml(
+        p.read_text(encoding="utf-8", errors="ignore"), source_file or p.name, "xml"
+    )
+
+
+def extract_from_ofd(path: str | Path, source_file: str = "") -> Invoice:
+    """OFD（增值税电子发票）= ZIP 容器，取内嵌结构化 XML 走同一条解析路。
+
+    边界：只读**内嵌结构化数据**（Invoice/Bill 类 XML）；纯版式 OFD
+    （文字画在 ContentStream 里）本实现不渲染 —— 抽不到就报错转
+    手动/视觉兜底，**不猜**。
+    """
+    import zipfile
+
+    p = Path(path)
+    try:
+        with zipfile.ZipFile(p) as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".xml")]
+            # 优先取名字像发票数据的，其次取最大的 XML
+            names.sort(
+                key=lambda n: (
+                    ("invoice" not in n.lower() and "bill" not in n.lower()),
+                    -zf.getinfo(n).file_size,
+                )
+            )
+            last_exc: ExtractionError | None = None
+            for n in names:
+                try:
+                    return _parse_invoice_xml(
+                        zf.read(n).decode("utf-8", errors="ignore"),
+                        source_file or p.name,
+                        "ofd",
+                    )
+                except ExtractionError as exc:
+                    last_exc = exc
+                    continue
+    except zipfile.BadZipFile as exc:
+        raise ExtractionError(f"OFD 无法打开（不是有效 ZIP 容器）：{exc}") from exc
+    raise ExtractionError(
+        f"OFD 里没有可用的结构化发票数据（{last_exc or '未找到 XML'}）。"
+        "请改传 PDF/图片，或手动填写。"
+    )
+
+
+def _parse_invoice_xml(text: str, source_file: str, method: str) -> Invoice:
+    """XML 文本 -> Invoice。抽到关键字段（号码/金额）之一才算成功。"""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ExtractionError(f"XML 无法解析：{exc}") from exc
+
+    values: dict[str, str] = {}
+    for node in root.iter():
+        tag = node.tag.split("}")[-1]          # 命名空间随便剥
+        if node.text and node.text.strip():
+            values.setdefault(tag, node.text.strip())
+            values.setdefault(tag.replace(" ", "").lower(), node.text.strip())
+
+    def pick(*names: str) -> str:
+        for n in names:
+            if n in values:
+                return values[n]
+            if n.replace(" ", "").lower() in values:
+                return values[n.replace(" ", "").lower()]
+        return ""
+
+    invoice = Invoice(
+        invoice_code=pick("InvoiceCode", "发票代码"),
+        invoice_number=pick("InvoiceNumber", "发票号码", "BillNumber", "票据号码", "Number"),
+        invoice_type=pick("InvoiceType", "发票类型", "BillType", "票据类型"),
+        issue_date=_parse_date_flexible(pick("IssueDate", "开票日期", "Date")),
+        buyer_name=pick("BuyerName", "购买方名称", "Buyer", "抬头"),
+        buyer_tax_id=pick("BuyerTaxId", "BuyerTaxNo", "购买方纳税人识别号", "购买方税号"),
+        seller_name=pick("SellerName", "销售方名称", "Seller"),
+        seller_tax_id=pick("SellerTaxId", "SellerTaxNo", "销售方纳税人识别号", "销售方税号"),
+        item_name=pick("ItemName", "项目名称", "GoodsName", "商品或服务名称"),
+        amount=_safe_money(pick("Amount", "AmountWithoutTax", "不含税金额", "金额")),
+        tax_rate=pick("TaxRate", "税率"),
+        tax_amount=_safe_money(pick("TaxAmount", "税额")),
+        total=_safe_money(pick("TotalAmount", "AmountWithTax", "价税合计", "合计金额", "合计")),
+        total_in_words=pick("TotalInWords", "价税合计大写", "大写金额", "大写"),
+        remark=pick("Remark", "备注"),
+        raw_text=text[:2000],
+        source_file=source_file,
+        extraction_method=method,
+    )
+    if not invoice.invoice_number and invoice.total is None:
+        raise ExtractionError("XML 里找不到发票关键字段（号码/金额），版式不受支持")
+    return invoice
+
+
+# --------------------------------------------------------------------------
+# 置信度标注（AI 预填 + 人工确认的中间层）
+# --------------------------------------------------------------------------
+
+#: 关键字段：必须与原件/查验结果一致 —— 修改须留"已核对原件"声明
+CRITICAL_FIELDS = ("total", "buyer_tax_id", "invoice_number")
+
+
+def assess_confidence(invoice: Invoice) -> dict[str, str]:
+    """给每个票面字段标注置信度，前端按色标呈现（绿/黄/红/灰）。
+
+    规则全部**确定性（零模型）**：
+
+    - ``high``（绿）：结构化来源（PDF 文本层 / XML / OFD）抽到的完整字段
+      —— 可一键确认；
+    - ``low``（黄）：**视觉/OCR 抽取的一律进这档**（OCR 有误差，必须人工核对）——
+      这补上了「视觉抽取路径没有人工核对卡点」的缺口；
+    - ``conflict``（红）：字段之间**对不上**（大小写金额不一致、
+      不含税+税额≠价税合计）—— 票面自相矛盾或被篡改的典型特征，
+      **必须人工按原件更正**；
+    - ``missing``（灰）：没抽到，人工补。
+
+    查验 API 接入后（interfaces.InvoiceVerifier），关键三项可再上调 —— Phase 2。
+    """
+    from .models import parse_chinese_amount, parse_money
+
+    vision = (invoice.extraction_method or "") in {"vision"}
+
+    def base(ok: bool) -> str:
+        if not ok:
+            return "missing"
+        return "low" if vision else "high"
+
+    conf = {
+        "invoice_code": base(bool(invoice.invoice_code)),
+        "invoice_number": base(bool(invoice.invoice_number)),
+        "invoice_type": base(bool(invoice.invoice_type)),
+        "issue_date": base(invoice.issue_date is not None),
+        "buyer_name": base(bool(invoice.buyer_name)),
+        "buyer_tax_id": base(bool(invoice.buyer_tax_id)),
+        "seller_name": base(bool(invoice.seller_name)),
+        "seller_tax_id": base(bool(invoice.seller_tax_id)),
+        "item_name": base(bool(invoice.item_name)),
+        "amount": base(invoice.amount is not None),
+        "tax_rate": base(bool(invoice.tax_rate)),
+        "tax_amount": base(invoice.tax_amount is not None),
+        "total": base(invoice.total is not None),
+        "total_in_words": base(bool(invoice.total_in_words)),
+        "remark": base(bool(invoice.remark)),
+    }
+
+    # ---- 冲突检测：比"字段有没有"更重要 —— 这是防篡改的眼睛 ----
+    words = (
+        parse_chinese_amount(invoice.total_in_words) if invoice.total_in_words else None
+    )
+    if words is not None and invoice.total is not None and words != invoice.total:
+        conf["total"] = conf["total_in_words"] = "conflict"
+    if None not in (invoice.amount, invoice.tax_amount, invoice.total):
+        if (
+            parse_money(invoice.amount) + parse_money(invoice.tax_amount)
+            != parse_money(invoice.total)
+        ):
+            conf["amount"] = conf["tax_amount"] = conf["total"] = "conflict"
+    return conf
 
 
 # --------------------------------------------------------------------------

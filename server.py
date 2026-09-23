@@ -80,7 +80,7 @@ UPLOAD_DIR_NAME = "uploads"
 DEMO_MODE = False
 _MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
-_ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".xml", ".ofd"}
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +95,19 @@ class AuditRunRequest(BaseModel):
         default=False, description="PDF 无文本层时是否允许调视觉模型兜底"
     )
     request: dict = Field(default_factory=dict, description="报销申请单字段")
+    # ---- AI 预填 + 人工确认（票面确认卡）----
+    invoice_overrides: dict = Field(
+        default_factory=dict, description="人工确认后的票面字段（覆盖抽取结果）"
+    )
+    field_changes: list = Field(
+        default_factory=list,
+        description="字段级修改留痕：[{field, from, to}]，逐笔进审计日志",
+    )
+    critical_confirmed: bool = Field(
+        default=False,
+        description="关键字段（金额/税号/发票号码）已逐项核对原件的声明",
+    )
+    confirmed_by: str = Field(default="", description="确认人（留痕）")
 
 
 class AuditDecideRequest(BaseModel):
@@ -199,9 +212,20 @@ async def audit_run(req: AuditRunRequest):
     if suffix not in _ALLOWED_SUFFIXES:
         raise HTTPException(status_code=400, detail=f"不支持的文件类型：{suffix}")
 
-    # ⚠️ 顺序要紧：**先校验申请单，再落盘**。
+    # ⚠️ 顺序要紧：**先校验，再落盘**。
     # 反过来的话，一张缺字段的废单会先把文件写进 data/uploads/ 再被 400 拒掉，
     # 留下一个没人引用的孤儿文件。
+
+    # 关键字段（金额/税号/发票号码）被人工改过的，必须带"已逐项核对原件"声明。
+    # 服务端自己核不了原件，但**可以让人工留下可追责的声明** —— 这是留痕精神：
+    # 改可以改，改了要有人对原件负责。
+    _CRITICAL = {"total", "buyer_tax_id", "invoice_number"}
+    if any(c.get("field") in _CRITICAL for c in req.field_changes) and not req.critical_confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail="修改了关键字段（金额/税号/发票号码），必须勾选「已逐项核对原件」——改可以改，改了要对原件负责并留痕。",
+        )
+
     try:
         request = _build_request(req.request)
     except (KeyError, ValueError) as exc:
@@ -213,7 +237,10 @@ async def audit_run(req: AuditRunRequest):
 
     try:
         result = await run_audit(
-            target, request, store=AUDIT_STORE, use_vision=req.use_vision
+            target, request, store=AUDIT_STORE, use_vision=req.use_vision,
+            invoice_overrides=req.invoice_overrides,
+            field_changes=req.field_changes,
+            confirmed_by=req.confirmed_by or request.applicant,
         )
     except Exception as exc:  # noqa: BLE001 —— 抽取失败给人话提示，不是 500
         logger.warning("audit run failed: %s", exc)
@@ -235,11 +262,11 @@ class ExtractRequest(BaseModel):
 
 @app.post("/api/audit/extract")
 async def audit_extract(req: ExtractRequest):
-    """只抽取、不建单 —— 给页面做「按票面自动填」用。
+    """只抽取、不建单 —— 给「票面确认卡」做 AI 预填用。
 
-    **回填边界（防呆红线）**：只回"票面上有的"（金额、票面日期、费用类型**推荐**）。
-    申请人、事由、提交日期、人数、晚数这些**申报信息一律不给默认值** ——
-    给了就等于替申请人编申报数据（同「提交日期不设默认值」的理由）。
+    返回**全量票面事实 + 每字段置信度**（绿/黄/红/灰，见
+    ``finance/extractor.py::assess_confidence``）。回填边界不变：只给
+    **票面上有的**；申请人、事由、提交日期这些**申报信息一律不给默认值**。
     """
     if not req.content_b64:
         raise HTTPException(status_code=400, detail="发票内容为空。")
@@ -286,16 +313,29 @@ async def audit_extract(req: ExtractRequest):
     )
     resolved, source = _resolved_expense_type(ctx)
 
+    from finance.extractor import CRITICAL_FIELDS, assess_confidence
+
     return {
+        # 全量票面事实 —— 供「票面确认卡」逐项人工核对
         "invoice": {
-            "invoice_type": invoice.invoice_type,
+            "invoice_code": invoice.invoice_code,
             "invoice_number": invoice.invoice_number,
+            "invoice_type": invoice.invoice_type,
             "issue_date": invoice.issue_date.isoformat() if invoice.issue_date else None,
+            "buyer_name": invoice.buyer_name,
+            "buyer_tax_id": invoice.buyer_tax_id,
             "seller_name": invoice.seller_name,
+            "seller_tax_id": invoice.seller_tax_id,
             "item_name": invoice.item_name,
+            "amount": float(invoice.amount) if invoice.amount is not None else None,
             "tax_rate": invoice.tax_rate,
+            "tax_amount": float(invoice.tax_amount) if invoice.tax_amount is not None else None,
             "total": float(invoice.total) if invoice.total is not None else None,
+            "total_in_words": invoice.total_in_words,
+            "remark": invoice.remark,
         },
+        "confidence": assess_confidence(invoice),
+        "critical_fields": list(CRITICAL_FIELDS),
         "suggest": {"expense_type": resolved or "", "source": source},
     }
 
@@ -471,6 +511,10 @@ def _build_request(spec: dict) -> ReimbursementRequest:
         nights=int(nights) if nights not in (None, "") else None,
         headcount=int(headcount) if headcount not in (None, "") else None,
         has_itemized_list=bool(spec.get("has_itemized_list")),
+        project=str(spec.get("project") or "").strip(),
+        cost_center=str(spec.get("cost_center") or "").strip(),
+        allocation_ratio=str(spec.get("allocation_ratio") or "").strip(),
+        note=str(spec.get("note") or "").strip(),
     )
 
 

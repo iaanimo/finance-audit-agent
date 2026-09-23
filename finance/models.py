@@ -332,6 +332,13 @@ class ReimbursementRequest(BaseModel):
 
     has_itemized_list: bool = Field(default=False, description="是否附采购清单")
 
+    # ---- 申报扩展信息（人工填写/确认）----
+    # 分摊拆凭证是 Phase 2：当前透传 + 留痕，不参与借贷拆分（README 注明）。
+    project: str = Field(default="", description="归属项目")
+    cost_center: str = Field(default="", description="成本中心")
+    allocation_ratio: str = Field(default="", description="分摊比例，如 50%")
+    note: str = Field(default="", description="备注")
+
     @field_validator("amount", mode="before")
     @classmethod
     def _coerce_amount(cls, v: Any) -> Any:
