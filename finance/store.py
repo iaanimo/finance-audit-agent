@@ -76,7 +76,14 @@ class AuditStore:
     """
 
     def __init__(self, base_dir: str | Path | None = None):
-        self.base_dir = Path(base_dir) if base_dir else _default_base_dir()
+        self._base_dir = Path(base_dir) if base_dir else None
+
+    @property
+    def base_dir(self) -> Path:
+        """**惰性解析**默认目录 —— A1 教训：模块级构造曾把真实 data/ 路径冻结在
+        import 时，测试一打 reset 就清空真实审核单。现在首次使用才解析，
+        测试改配置即可把整个存储指进临时目录。"""
+        return self._base_dir or _default_base_dir()
 
     # ---- 路径 ----
 

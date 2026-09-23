@@ -108,7 +108,7 @@ def build_samples() -> list[Sample]:
         Sample(
             key="S01_hotel_ok",
             title="合规住宿（上海 3 晚 × 550）",
-            expects="全部 17 条 PASS，系统建议 APPROVED",
+            expects="全部适用规则通过，系统建议 APPROVED",
             invoice_number="24312000000012345601",
             seller_name="上海某某酒店管理有限公司",
             seller_tax_id="91310115MA1K3AAAAA",

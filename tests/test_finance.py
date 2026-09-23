@@ -1798,8 +1798,9 @@ def test_prefill_overrides_enter_rules_with_change_log(tmp_path):
     confirmed = [e for e in events if e["event"] == "prefill_confirmed"]
     assert len(confirmed) == 1
     assert confirmed[0]["confirmed_by"] == "张三"
+    # from 由**服务端自算**（= 抽取基准的 JSON 形态），不信客户端自报
     assert confirmed[0]["changes"] == [
-        {"field": "total", "from": "1650.0", "to": "2000.0"}
+        {"field": "total", "from": "1650.00", "to": "2000.00"}
     ]
 
 
@@ -1856,3 +1857,102 @@ def test_extract_from_xml_and_ofd(tmp_path):
     inv2 = extract(op)
     assert inv2.extraction_method == "ofd"
     assert inv2.invoice_number == inv.invoice_number
+
+
+# ==========================================================================
+# 四轮加固：票种大类 + 规则路由（rule_scope 配置化）
+# ==========================================================================
+
+
+def test_ticket_kind_mapping(policy):
+    """票种识别顺序固定：交通 → 财政票据 → 境外 → 增值税 → 其他；空 = unknown。"""
+    assert policy.ticket_kind("火车票") == "transport"
+    assert policy.ticket_kind("航空运输电子客票行程单") == "transport"
+    assert policy.ticket_kind("定额发票") == "voucher"
+    assert policy.ticket_kind("境外 Invoice") == "foreign"
+    assert policy.ticket_kind("电子发票（普通发票）") == "vat"
+    assert policy.ticket_kind("增值税专用发票") == "vat"
+    assert policy.ticket_kind("收据") == "other"
+    assert policy.ticket_kind("") == "unknown"
+
+
+def test_transport_ticket_is_not_killed_by_vat_rules(policy):
+    """🔴 正确性核心：火车票没有抬头/税号/大写栏 —— 增值税票口径的规则
+    （R001/R002/R016/R017）对它判 N/A，而不是把合规票据误杀成 REJECTED。
+    """
+    inv = make_invoice(
+        invoice_type="火车票", buyer_name="", buyer_tax_id="",
+        item_name="*运输服务*铁路旅客运输", tax_rate="", total_in_words="",
+        amount=None, tax_amount=None,
+    )
+    findings = evaluate(inv, make_request(expense_type="差旅费"), policy,
+                        history=MemoryHistoryView())
+    for rid in ("R001", "R002", "R016", "R017"):
+        f = finding_of(findings, rid)
+        assert f.applicable is False, f"{rid} 对交通票据应判 N/A"
+        assert f.severity is Severity.PASS
+    assert aggregate(findings) is not SuggestedStatus.REJECTED, "合规交通票据不得被误杀"
+
+
+def test_foreign_ticket_gets_exchange_warn_not_tax_fail(policy):
+    """境外票据：R002 税号核验 N/A（票面本无税号），R019 汇率核验 WARN 转人工。"""
+    inv = make_invoice(
+        invoice_type="境外 Invoice", buyer_tax_id="", tax_rate="",
+        total_in_words="", amount=None, tax_amount=None,
+    )
+    findings = evaluate(inv, make_request(expense_type="差旅费"), policy,
+                        history=MemoryHistoryView())
+    assert finding_of(findings, "R002").applicable is False
+    f = finding_of(findings, "R019")
+    assert f.severity is Severity.WARN
+    assert "汇率" in f.message
+
+
+def test_nonstandard_ticket_forces_manual_review(policy):
+    """认不出的票据：不判罪也不放行 —— R009 强制转人工（WARN）。
+    制度 3.4 **明文不接受**的（手写收据）仍是 FAIL —— 明文禁止 ≠ 信息不明。"""
+    inv = make_invoice(invoice_type="杂费票据")
+    findings = evaluate(inv, make_request(), policy, history=MemoryHistoryView())
+    f = finding_of(findings, "R009")
+    assert f.severity is Severity.WARN
+    assert "转人工" in f.message
+
+    inv2 = make_invoice(invoice_type="手写收据")
+    f2 = finding_of(evaluate(inv2, make_request(), policy,
+                             history=MemoryHistoryView()), "R009")
+    assert f2.severity is Severity.FAIL, "制度明文不接受的票种仍是 FAIL"
+
+
+def test_c2_vat_ticket_not_hijacked_by_content_words(policy):
+    """C2：「通行费电子发票」是**真增值税票** —— 判据是票种自称的结构词，
+    不是业务内容词。抬头/税号核验必须照跑，不许被"通行费"抢成 transport。"""
+    assert policy.ticket_kind("通行费电子发票") == "vat"
+    inv = make_invoice(invoice_type="通行费电子发票", buyer_name="个人")
+    f = finding_of(evaluate(inv, make_request(expense_type="市内交通费"), policy,
+                            history=MemoryHistoryView()), "R001")
+    assert f.applicable is True and f.severity is Severity.FAIL, "抬头违规必须被抓住"
+
+
+def test_c3_r019_stays_quiet_for_domestic_tickets(policy):
+    """C3：票面类型抽不到（unknown）不许凭空安"境外"身份 —— 专属规则自查适用性。"""
+    inv = make_invoice(invoice_type="", buyer_tax_id="", total_in_words="")
+    f = finding_of(evaluate(inv, make_request(), policy,
+                            history=MemoryHistoryView()), "R019")
+    assert f.severity is Severity.PASS, "国内票（类型缺失）不触发汇率核验"
+
+
+def test_c4_rule_scope_config_is_validated(tmp_path):
+    """C4：rule_scope/ticket_kinds 写错就炸 PolicyError（配置漂移不许静默）。"""
+    import shutil
+
+    from finance.policy import PolicyError, load_policy_bundle
+
+    tmp = tmp_path / "policies"
+    shutil.copytree(PROJECT_ROOT / "finance" / "policies", tmp)
+    rules_path = tmp / "rules.yaml"
+    rules_path.write_text(
+        rules_path.read_text(encoding="utf-8") + "\nrule_scope:\n  R999: [vat]\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(PolicyError):
+        load_policy_bundle(tmp)

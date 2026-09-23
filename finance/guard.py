@@ -110,10 +110,13 @@ def allowed_numbers(findings: list[AuditFinding]) -> set[str]:
         for value in _flatten(f.evidence):
             allowed |= _numbers_in(value)
 
-    # 汇总计数：条数本身是事实，允许引用
+    # 汇总计数：条数本身是事实，允许引用（含"适用/不适用"两种口径 ——
+    # 模板叙述会写"通过 X 条，不适用 Y 条"，两个数字都得能溯源）
     counts = {
         len(findings),
         sum(1 for f in findings if f.severity is Severity.PASS),
+        sum(1 for f in findings if f.severity is Severity.PASS and f.applicable),
+        sum(1 for f in findings if not f.applicable),
         sum(1 for f in findings if f.severity is Severity.WARN),
         sum(1 for f in findings if f.severity is Severity.FAIL),
     }

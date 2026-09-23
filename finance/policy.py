@@ -174,6 +174,10 @@ class PolicyBundle:
     budgets: dict[str, DepartmentBudget]
     vat_categories: list[VatCategory] = field(default_factory=list)
     simplified_levy_rate: int = 3
+    #: 票种大类关键词表（rules.yaml 的 ticket_kinds）—— 规则路由的依据。
+    ticket_kinds: dict[str, list] = field(default_factory=dict)
+    #: 规则适用票种（rules.yaml 的 rule_scope）。未列出的规则 = 全票种适用。
+    rule_scope: dict[str, list] = field(default_factory=dict)
     #: 本公司是否可抵扣进项税额（一般纳税人 = True，小规模纳税人 = False）。
     #: 与「专用发票」两个条件**同时**成立才拆进项税额行 —— 见 finance/voucher.py。
     input_tax_deductible: bool = True
@@ -190,6 +194,36 @@ class PolicyBundle:
 
     def rule_ids(self) -> list[str]:
         return [r.rule_id for r in self.rules]
+
+    def ticket_kind(self, invoice_type: str) -> str:
+        """票种大类：``vat / transport / voucher / foreign / other / unknown``。
+
+        识别顺序固定：**增值税票系优先**（认票面自称的结构词，如"电子发票/
+        增值税/数电票"），再归交通/财政/境外。判据是**票种自称**不是业务内容 ——
+        「通行费电子发票」是真增值税票，不能被"通行费"抢走（C2 教训）。
+        空类型 = ``unknown`` —— **不跳过任何规则**（缺信息时全量跑）。
+        """
+        text = str(invoice_type or "")
+        if not text.strip():
+            return "unknown"
+        # 配置缺失 = 无法归类 -> unknown（**不跳过任何规则**）。
+        # C4 残留教训：这里曾掉进 keyword 循环后 `return "other"`，
+        # 于是删掉配置块 = 所有票种变 other = 增值税规则全 N/A = 静默全面漏查。
+        if not self.ticket_kinds:
+            return "unknown"
+        low = text.lower()
+        for kind in ("vat", "transport", "voucher", "foreign"):
+            for kw in self.ticket_kinds.get(kind, []):
+                if kw and str(kw).lower() in low:
+                    return kind
+        return "other"
+
+    def rule_in_scope(self, rule_id: str, kind: str) -> bool:
+        """这条规则对该票种适用吗？未配置 = 适用；unknown 票种 = 一律适用。"""
+        scope = self.rule_scope.get(rule_id)
+        if not scope or kind == "unknown":
+            return True
+        return kind in scope
 
     def vat_category_for(self, item_name: str) -> VatCategory | None:
         """按票面项目名称匹配应税行为类别。匹配不到返回 None。"""
@@ -249,6 +283,34 @@ def load_policy_bundle(policy_dir: str | Path | None = None) -> PolicyBundle:
     if not rules:
         raise PolicyError("rules.yaml 里没有任何规则")
 
+    # ---- 票种路由配置的加载校验（C4：配置漂移必须**启动就炸**，不许静默失效）----
+    # 项目纪律是"制度文件缺漏/格式错 -> PolicyError"；这两个配置块曾用 dict()
+    # 直存，写错 key、整块删掉都静默退回误判状态 —— 财务系统里这等于配置在漂移。
+    # C4 残留补丁：两块必须**成对出现**（缺一半=路由状态不明）；两块全缺 =
+    # 不启用票种路由（ticket_kind() 返回 unknown，全部规则照跑，宁多勿漏）。
+    _raw_kinds = rules_doc.get("ticket_kinds")
+    _raw_scope = rules_doc.get("rule_scope")
+    if (_raw_kinds is None) != (_raw_scope is None):
+        raise PolicyError(
+            "rules.yaml 的 ticket_kinds 与 rule_scope 必须成对出现 —— "
+            "缺一半则路由状态不明，禁止静默"
+        )
+    _KNOWN_KINDS = {"vat", "transport", "voucher", "foreign", "other"}
+    ticket_kinds = dict(_raw_kinds or {})
+    rule_scope = dict(_raw_scope or {})
+    for kind, kws in ticket_kinds.items():
+        if kind not in _KNOWN_KINDS:
+            raise PolicyError(f"rules.yaml ticket_kinds 含未知票种「{kind}」（合法：{sorted(_KNOWN_KINDS)}）")
+        if not isinstance(kws, list):
+            raise PolicyError(f"rules.yaml ticket_kinds.{kind} 必须是关键词列表")
+    _known_rule_ids = {r.rule_id for r in rules}
+    for rid, kinds in rule_scope.items():
+        if rid not in _known_rule_ids:
+            raise PolicyError(f"rules.yaml rule_scope 引用了不存在的规则「{rid}」")
+        bad = [k for k in kinds if k not in _KNOWN_KINDS]
+        if bad or not isinstance(kinds, list):
+            raise PolicyError(f"rules.yaml rule_scope.{rid} 含非法票种 {bad or kinds!r}")
+
     budgets = {
         spec.name: spec
         for spec in (
@@ -270,6 +332,8 @@ def load_policy_bundle(policy_dir: str | Path | None = None) -> PolicyBundle:
         vat_categories=[VatCategory.from_dict(d) for d in vat_doc.get("categories", [])],
         simplified_levy_rate=int(vat_doc.get("simplified_levy_rate", 3)),
         input_tax_deductible=bool(company.get("input_tax_deductible", True)),
+        ticket_kinds=ticket_kinds,
+        rule_scope=rule_scope,
         policy_md=policy_md,
         fiscal_year=int(budgets_doc.get("fiscal_year", 2026)),
     )
@@ -297,7 +361,9 @@ def _read_text(path: Path) -> str:
 # 制度原文解析（供一致性测试用）
 # --------------------------------------------------------------------------
 
-_CLAUSE_HEADING = re.compile(r"^\*\*(\d+\.\d+)\s+([^*]+)\*\*", re.MULTILINE)
+# 两种标题写法都认：「**3.1 标题**」（号题同粗）与「**2.3** 标题」（只粗号）。
+# 曾漏掉后者 —— 2.3 正是"推翻系统建议必须书面说明理由"那条，三方一致测试看不见它。
+_CLAUSE_HEADING = re.compile(r"^\*\*(\d+\.\d+)(?:\s+([^*]+))?\*\*", re.MULTILINE)
 
 
 def parse_clause_headings(policy_md: str) -> dict[str, str]:
@@ -307,6 +373,6 @@ def parse_clause_headings(policy_md: str) -> dict[str, str]:
     这让"代码里的规则"和"制度里的条款"之间不可能悄悄脱节。
     """
     return {
-        m.group(1): m.group(2).strip()
+        m.group(1): (m.group(2) or "").strip()
         for m in _CLAUSE_HEADING.finditer(policy_md)
     }

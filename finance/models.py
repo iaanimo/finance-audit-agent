@@ -11,7 +11,7 @@
    全包内比金额一律走它们。
 2. **每种结论都带证据**。:class:`AuditFinding` 强制携带 ``evidence`` 字典，
    记录"哪个字段、实际值多少、期望值多少"。只看结论无法反驳，看证据才能。
-3. **状态机是显式的**。:class:`AuditState` 的六态不是装饰，它对应审核流程里
+3. **状态机是显式的**。:class:`AuditState` 的八态（系统推进六步 + 人工两终态）不是装饰，它对应审核流程里
    真实发生的阶段推进——见 finance/audit.py。
 """
 
@@ -57,13 +57,13 @@ def parse_money(value: Any) -> Decimal:
 
 
 def money_eq(a: Any, b: Any) -> bool:
-    """金额**相等**判断，容忍 1 分的舍入残差。
+    """容差版相等判断（容忍 1 分舍入残差）。
 
-    容差在这里是必要的：人均金额、每晚单价这类派生值做除法后要
-    ``quantize`` 到分，1 分的残差是分摊的必然产物，不是差异。
-
-    注意不要用 ``==`` 直接比 Decimal —— 那会把合法的舍入残差判成不等。
-    """
+    ⚠️ **业务判定一律不用它** —— 限额、勾稽、大小写、金额一致性全部是
+    零容差精确比较（:func:`money_le` / 直接相等）。除法派生值（人均/每晚）
+    的正确做法是**量化到分后再精确比较**，不是比较时放宽。
+    本函数仅存于测试/对拍工具（曾被 README 引为合规依据 —— 那是文档说谎，
+    已改）。"""
     return abs(parse_money(a) - parse_money(b)) <= CENT
 
 
@@ -363,6 +363,9 @@ class AuditFinding(BaseModel):
     severity: Severity
     message: str = Field(description="人话结论")
     evidence: dict[str, Any] = Field(default_factory=dict, description="证据字段")
+    #: 本规则对当前票种**是否适用**。False = N/A（票种不涉及本规则），
+    #: 与"检查过且通过"是两种语义 —— 前端分开展示，别让财务人员误读。
+    applicable: bool = True
     error: str | None = Field(
         default=None, description="规则执行异常时的错误信息（异常降级为 WARN）"
     )
@@ -404,9 +407,9 @@ class Voucher(BaseModel):
         """借贷是否平衡 —— **精确相等，不带容差**。
 
         「有借必有贷、借贷必相等」是借贷记账法里的绝对等式，会计上不存在
-        "差一分也算平"的凭证。``money_eq`` 的 1 分容差是给「人均」「每晚」
-        这类**除法派生值**准备的（制度 4.2、4.3），用在这里会把
-        「票面不含税金额 + 税额 ≠ 价税合计」这种自相矛盾悄悄抹平。
+        "差一分也算平"的凭证。业务比较零容差 —— 「人均」「每晚」等除法派生值
+        量化到分后同样精确比较，没有任何场合放宽一分钱（放宽会把
+        「票面不含税金额 + 税额 ≠ 价税合计」这种自相矛盾悄悄抹平）。
         """
         return self.debit_total == self.credit_total
 

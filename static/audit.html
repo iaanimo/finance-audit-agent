@@ -109,6 +109,7 @@
   .sev.PASS { background: var(--pass-bg); color: var(--pass); }
   .sev.WARN { background: var(--warn-bg); color: var(--warn); }
   .sev.FAIL { background: var(--fail-bg); color: var(--fail); }
+  .sev.NA { background: #ececec; color: #777; }
   .clause { font-size: 11px; color: var(--muted); }
   details { margin-top: 5px; }
   details summary {
@@ -326,7 +327,7 @@
     <div class="card"><div class="empty">
       <div class="big">🧾</div>
       选择一张样本票，点「提交审核」<br>
-      <span style="font-size:12px">审核结论由 18 条规则逐条算出，不经模型判断</span>
+      <span style="font-size:12px">审核结论由 19 条规则逐条算出，不经模型判断</span>
     </div></div>
   </div>
 
@@ -387,6 +388,7 @@ function loadSamples() {
       o.value = s.key; o.textContent = s.title;
       o.dataset.request = JSON.stringify(s.request || {});
       o.dataset.expects = s.expects || '';
+      o.dataset.file = s.pdf || '';   // 真实文件名（pdf/x… 都行）——文件名不许写死 .pdf
       sel.appendChild(o);
     });
   });
@@ -406,6 +408,7 @@ el('sampleSel').addEventListener('change', function () {
   el('nights').value = req.nights == null ? '' : req.nights;
   el('headcount').value = req.headcount == null ? '' : req.headcount;
   el('fileInput').value = '';
+  el('fileHint').textContent = '未选择样本时，用这里上传 PDF 或发票图片。';  // 清掉上次手动上传的痕迹（含失败提示）——清理必须对称
   el('manualNotice').style.display = 'none';   // 选了样本，撤掉手动上传的提示
   el('sampleHint').innerHTML =
     '预期命中：<b>' + esc(opt.dataset.expects || '—') + '</b>';
@@ -416,6 +419,7 @@ el('sampleSel').addEventListener('change', function () {
 el('fileInput').addEventListener('change', function () {
   if (this.files && this.files.length) {
     el('sampleSel').value = '';
+    el('sampleHint').textContent = '选样本会自动填好下面表单，并载入对应发票。';  // 清掉上次样本的痕迹——清理必须对称
     el('fileHint').textContent = '已选择：' + this.files[0].name + '（读取票面中…）';
     clearRequestForm();
     autoFillFromInvoice(this.files[0]);
@@ -458,8 +462,11 @@ function autoFillFromInvoice(file) {
       '　已按票面填：申请金额' + (sug ? '、费用类型（推荐' + sug + '，可改）' : '') +
       ' —— 申报信息请如实填写';
   }).catch(function (e) {
-    el('fileHint').textContent = '已选择：' + file.name +
-      '（票面自动抽取失败：' + e.message + '，请对照票面手工填写）';
+    // 预填失败要**降级且体面**：这不是系统坏了，是预填通道暂不可用 ——
+    // 手工填写照样能提交、照样审（审核通道独立）。演示屏幕上不许出现吓人的红字。
+    el('fileHint').innerHTML = '已选择：' + esc(file.name) +
+      '　<span style="color:#9a6700">⚠ 预填暂不可用（' + esc(e.message) +
+      '），可手工填写后提交 —— <b>不影响审核</b></span>';
   });
 }
 
@@ -668,13 +675,18 @@ function readFileAsBase64(file) {
 function getInvoice() {
   var sel = el('sampleSel');
   if (sel.value) {
+    // 文件名取清单里的真实名字（xml 样本曾被写死成 {key}.pdf，服务端后缀判断直接跑偏）
+    var opt = sel.options[sel.selectedIndex];
+    var fname = (opt && opt.dataset.file)
+      ? opt.dataset.file.split('/').pop()
+      : (sel.value + '.pdf');
     return fetch('/api/audit/sample/' + encodeURIComponent(sel.value))
       .then(function (r) {
         if (!r.ok) throw new Error('样本读取失败');
         return r.blob();
       })
       .then(function (blob) {
-        return readFileAsBase64(new File([blob], sel.value + '.pdf', { type: 'application/pdf' }));
+        return readFileAsBase64(new File([blob], fname, { type: 'application/octet-stream' }));
       });
   }
   var input = el('fileInput');
@@ -764,8 +776,9 @@ function renderResult(r) {
       '<div class="verdict">系统建议：' + VERDICT_TEXT[r.suggested_status] + '</div>' +
       '<div class="sub">' + STATE_TEXT[r.state] + '　·　' +
       '共 ' + r.findings.length + ' 条规则：' +
-      '通过 ' + count(r, 'PASS') + '　待判断 ' + count(r, 'WARN') +
-      '　驳回 ' + count(r, 'FAIL') + '</div></div>';
+      '通过 ' + count(r, 'PASS') + '（查过无问题）　' +
+      '不适用 ' + countNA(r) + '（票种/费用不涉及，未查）　' +
+      '待判断 ' + count(r, 'WARN') + '　驳回 ' + count(r, 'FAIL') + '</div></div>';
   }
 
   var html = '<div class="card"><div class="body">' + banner + '</div></div>';
@@ -789,9 +802,14 @@ function renderResult(r) {
     '<th style="width:52px">规则</th><th style="width:52px">判定</th>' +
     '<th style="width:150px">制度依据</th><th>结论</th></tr></thead><tbody>';
   r.findings.forEach(function (f) {
-    html += '<tr>' +
-      '<td class="rid">' + esc(f.rule_id) + '</td>' +
-      '<td><span class="sev ' + f.severity + '">' + f.severity + '</span></td>' +
+    // N/A（不适用）= 中性灰、不进"通过"计数 —— "没查"绝不冒充"查了没事"：
+    // 交通/境外票上传时满屏绿色 PASS 会让财务人员误读成"全查过没问题"。
+    var na = f.applicable === false;
+    var sevCell = na
+      ? '<td><span class="sev NA" title="不适用：票种/费用类型不涉及本规则（未核查）">N/A</span></td>'
+      : '<td><span class="sev ' + f.severity + '">' + f.severity + '</span></td>';
+    html += '<tr' + (na ? ' style="opacity:.75"' : '') + '>' +
+      '<td class="rid">' + esc(f.rule_id) + '</td>' + sevCell +
       '<td class="clause">第 ' + esc(f.clause) + ' 条<br>' + esc(f.title) + '</td>' +
       '<td>' + esc(f.message) +
       '<details><summary>证据与制度原文</summary><pre>' +
@@ -866,7 +884,13 @@ function kv(k, v) {
     esc(v == null || v === '' ? '—' : v) + '</td></tr>';
 }
 function count(r, sev) {
-  return r.findings.filter(function (f) { return f.severity === sev; }).length;
+  // N/A（不适用）不算"通过"——"没查"不能冒充"查了没事"
+  return r.findings.filter(function (f) {
+    return f.severity === sev && f.applicable !== false;
+  }).length;
+}
+function countNA(r) {
+  return r.findings.filter(function (f) { return f.applicable === false; }).length;
 }
 
 /* ---------------- 决定 ---------------- */

@@ -7,7 +7,7 @@
 
 S01_hotel_ok:
   title: 合规住宿（上海 3 晚 × 550）
-  expects: 全部 17 条 PASS，系统建议 APPROVED
+  expects: 全部适用规则通过，系统建议 APPROVED
   pdf: pdf/S01_hotel_ok.pdf
   invoice:
     buyer_name: 示例科技有限公司
@@ -304,3 +304,62 @@ S11_wrong_vat_rate:
     nights: 1
     headcount: null
     has_itemized_list: false
+# ---- 非增值税样本（票种路由 / R019 的端到端回归；手写区，make_samples.py 暂无对应模板。
+#      放清单末尾：下拉按清单顺序展示，编号顺序不许被打断）----
+S12_train_ticket:
+  title: 铁路电子客票（交通票据，票种路由不误杀）
+  expects: （全通过：交通票据票种，增值税口径规则判不适用、汇率核验不触发）
+  pdf: xml/S12_train_ticket.xml
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 中国铁路某某局集团有限公司
+    invoice_number: '24312000000088888812'
+    invoice_type: 铁路电子客票
+    item_name: '*运输服务*铁路旅客运输'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 差旅费
+    amount: '550.00'
+    reason: 出差高铁
+    submit_date: '2026-09-18'
+S13_foreign_invoice:
+  title: 境外 INVOICE（汇率人工核验）
+  expects: R019 WARN（境外票据汇率人工核验）
+  pdf: xml/S13_foreign_invoice.xml
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: Overseas Supplier Co., Ltd.
+    invoice_number: 'INV-2026-0001'
+    invoice_type: INVOICE
+    item_name: '*技术服务*技术服务费'
+    total: '2000.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 差旅费
+    amount: '2000.00'
+    reason: 境外技术服务费
+    submit_date: '2026-09-18'
+S14_fixed_voucher:
+  title: 定额发票（制度 3.4 明文不接受）
+  expects: R009 FAIL（制度 3.4 明文不接受定额发票）
+  pdf: xml/S14_fixed_voucher.xml
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 某某市出租汽车有限公司
+    invoice_number: '24312000000077777714'
+    invoice_type: 定额发票
+    item_name: '*运输服务*出租车费'
+    total: '100.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 市内交通费
+    amount: '100.00'
+    reason: 市内公务交通
+    submit_date: '2026-09-18'

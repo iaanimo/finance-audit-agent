@@ -499,8 +499,10 @@ def _parse_invoice_xml(text: str, source_file: str, method: str) -> Invoice:
 # 置信度标注（AI 预填 + 人工确认的中间层）
 # --------------------------------------------------------------------------
 
-#: 关键字段：必须与原件/查验结果一致 —— 修改须留"已核对原件"声明
-CRITICAL_FIELDS = ("total", "buyer_tax_id", "invoice_number")
+#: 关键字段：必须与原件/查验结果一致 —— 修改须留"已核对原件"声明。
+#: **发票类型也在内**：它是规则适用范围（票种路由）的开关，改它等于改判定口径
+#: （B1 教训：S04 一张抬头违规的票，改 invoice_type 为"火车票"曾直接翻案成 APPROVED）。
+CRITICAL_FIELDS = ("total", "buyer_tax_id", "invoice_number", "invoice_type")
 
 
 def assess_confidence(invoice: Invoice) -> dict[str, str]:
