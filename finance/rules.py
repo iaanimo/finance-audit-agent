@@ -43,6 +43,7 @@ from .models import (
     parse_chinese_amount,
     parse_money,
 )
+from .interfaces import FAILED, UNAVAILABLE, VERIFIED, VerificationResult
 from .policy import PolicyBundle, RuleSpec
 
 # --------------------------------------------------------------------------
@@ -88,6 +89,8 @@ class RuleContext:
     policy: PolicyBundle
     history: HistoryView | None = None
     voucher: Voucher | None = None
+    #: 发票查验结果（第三方接口，默认 None = 未接入）。只有 R018 用它。
+    verification: VerificationResult | None = None
 
 
 @dataclass
@@ -872,6 +875,47 @@ def _parse_rate(raw: str) -> float | None:
     return value
 
 
+def check_invoice_verification(ctx: RuleContext) -> CheckOutcome:
+    """R018 发票查验（真伪/状态）—— **第三方接口，默认不接入**。
+
+    三态语义（接口见 finance/interfaces.py）：
+
+    - 未接入查验平台（verification=None）-> **跳过并注明**。"没接第三方"是
+      能力缺口的事实，写在结论里由人工核验 —— 不冒充"查验通过"，
+      也不替制度扣 FAIL 的帽子。**演示产品默认就是这一档。**
+    - 查验通过 -> PASS。
+    - 查验不通过（查无此票/作废/红冲）-> **FAIL**（制度 3.9：不得报销）——
+      票据本身不合法有效，这是事实性违规。
+    - 查验未能完成（平台超时/限流）-> **WARN 转人工** —— 查不了 ≠ 假票。
+    """
+    v = ctx.verification
+    ev = {
+        "field": "发票查验",
+        "actual": v.status if v else None,
+        "expected": "查验通过（真伪、状态正常）",
+        "verifier_available": v is not None,
+    }
+    if v is None:
+        return _skip(
+            "未接入发票查验平台（已留 Verification 接口），票面真伪由人工核验",
+            **ev,
+        )
+    ev.update({"provider": v.provider, "reason": v.reason, "checked_at": v.checked_at})
+    if v.status == VERIFIED:
+        return _pass(f"发票查验通过（{v.provider or '查验平台'}）", **ev)
+    if v.status == FAILED:
+        return _fail(
+            f"发票查验不通过：{v.reason or '查无此票/作废/红冲'}，不得报销", **ev
+        )
+    # UNAVAILABLE：平台不可用/超时/限流 —— 能力缺口，转人工，不判罪
+    return CheckOutcome(
+        passed=False,
+        message=f"本次发票查验未能完成（{v.reason or '查验平台不可用'}），提交人工复核",
+        evidence=ev,
+        severity_override=Severity.WARN,
+    )
+
+
 # 规则 id -> checker 函数。rules.yaml 的 checker 字段必须能在这里找到。
 CHECKERS: dict[str, Callable[[RuleContext], CheckOutcome]] = {
     "check_buyer_name": check_buyer_name,
@@ -891,6 +935,7 @@ CHECKERS: dict[str, Callable[[RuleContext], CheckOutcome]] = {
     "check_prompt_injection": check_prompt_injection,
     "check_amount_in_words": check_amount_in_words,
     "check_vat_rate": check_vat_rate,
+    "check_invoice_verification": check_invoice_verification,
 }
 
 
@@ -907,16 +952,19 @@ def evaluate(
     history: HistoryView | None = None,
     voucher: Voucher | None = None,
     only: list[str] | None = None,
+    verification: VerificationResult | None = None,
 ) -> list[AuditFinding]:
     """顺序跑规则，返回全部判定结果。
 
     :param only: 只跑指定的 rule_id（状态机分阶段推进时用）。None 表示全部。
+    :param verification: 发票查验结果（第三方接口）；None = 未接入，R018 跳过。
 
     单条规则抛异常**不会中断整轮审核** —— 降级成 WARN「规则执行异常」。
     规则引擎永不 500：一条规则写错，不应该让整单审不下去，只应该让它转人工。
     """
     ctx = RuleContext(
-        invoice=invoice, request=request, policy=policy, history=history, voucher=voucher
+        invoice=invoice, request=request, policy=policy, history=history,
+        voucher=voucher, verification=verification,
     )
     findings: list[AuditFinding] = []
 

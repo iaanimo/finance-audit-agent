@@ -97,6 +97,10 @@ class AccountSpec:
     expense_type: str
     keywords: tuple[str, ...]
     debit_account: str
+    #: 该类费用取得的专用发票，进项税额**是否允许抵扣**。
+    #: 餐饮/居民日常/娱乐服务**法定不得抵扣**（财税〔2016〕36号 附件1 第二十七条），
+    #: 在 accounts.yaml 里逐项声明，缺省 True（如办公用品、通讯费）。
+    input_tax_deductible: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "AccountSpec":
@@ -104,6 +108,7 @@ class AccountSpec:
             expense_type=_require(d, "expense_type", "科目映射"),
             keywords=tuple(d.get("keywords", [])),
             debit_account=_require(d, "debit_account", "科目映射", "expense_type"),
+            input_tax_deductible=bool(d.get("input_tax_deductible", True)),
         )
 
 

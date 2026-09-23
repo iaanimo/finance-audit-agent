@@ -1675,3 +1675,93 @@ def test_serial_window_is_configurable(policy):
         assert f.severity is Severity.PASS, "窗口收窄到 2，隔 4 号不算连号"
     finally:
         policy.limits.pop("serial_invoice_max_gap", None)
+
+
+# ==========================================================================
+# 加固回归（二轮）：进项抵扣三条件 / R018 查验接口 / 岗位分离接口
+# ==========================================================================
+
+
+def test_meal_special_invoice_input_tax_is_not_deductible(policy):
+    """🔴 严禁级会计口径：购进**餐饮服务**的进项税额**不得抵扣**。
+
+    财税〔2016〕36号《营业税改征增值税试点实施办法》附件1 第二十七条：
+    购进的餐饮服务、居民日常服务、娱乐服务的进项税额**不得从销项税额中抵扣**。
+    餐饮费即使取得**专用发票**也不得拆「进项税额」行 —— 拆了就是违规抵扣，
+    是"严禁禁止"那一类会计错误。
+    """
+    inv = make_invoice(
+        invoice_type="电子发票（专用发票）",
+        item_name="*餐饮服务*餐费",
+    )
+    req = make_request(expense_type="餐饮费", nights=None, headcount=None)
+    v = build_voucher(inv, req, policy)
+    debits = [l for l in v.lines if l.direction == "借"]
+    assert len(debits) == 1, "餐饮服务专票也不得拆进项税额行"
+    assert debits[0].amount == parse_money("1650.00")  # 价税合计全额进业务招待费
+    assert all(l.account != policy.input_tax_account for l in v.lines)
+
+
+def test_r018_skipped_without_verifier(policy):
+    """未接入查验平台 -> 跳过并注明 —— **不冒充"查验通过"，也不判罪**。"""
+    f = finding_of(
+        evaluate(make_invoice(), make_request(), policy, history=MemoryHistoryView()),
+        "R018",
+    )
+    assert f.severity is Severity.PASS
+    assert "未接入" in f.message
+    assert f.evidence["verifier_available"] is False
+
+
+def test_r018_three_states(policy):
+    """R018 三态：查验通过 PASS / 不通过 FAIL（不得报销）/ 没查成 WARN 转人工。"""
+    from finance.interfaces import FAILED, UNAVAILABLE, VERIFIED, VerificationResult
+
+    req = make_request()
+    inv = make_invoice()
+
+    ok = evaluate(
+        inv, req, policy, history=MemoryHistoryView(),
+        verification=VerificationResult(status=VERIFIED, provider="税局查验平台"),
+    )
+    assert finding_of(ok, "R018").severity is Severity.PASS
+
+    bad = evaluate(
+        inv, req, policy, history=MemoryHistoryView(),
+        verification=VerificationResult(status=FAILED, reason="查无此票"),
+    )
+    f = finding_of(bad, "R018")
+    assert f.severity is Severity.FAIL
+    assert "不得报销" in f.message
+
+    down = evaluate(
+        inv, req, policy, history=MemoryHistoryView(),
+        verification=VerificationResult(status=UNAVAILABLE, reason="平台超时"),
+    )
+    assert finding_of(down, "R018").severity is Severity.WARN
+
+
+def test_decide_respects_operator_directory(tmp_path):
+    """岗位分离接口（生产必须接）：directory 说不许，decide 就不许。
+
+    《企业内部控制基本规范》：制单与审核不得同人。默认不接入（自由文本）
+    是 README 如实列明的缺口；接入后由本接口把关，拒绝要留原因进审计日志。
+    """
+
+    class NoSelfService:
+        def can_decide(self, operator, result):
+            if operator == result.request.applicant:
+                return False, "制单与审核不得同人（不相容岗位分离）"
+            return True, ""
+
+    store = AuditStore(base_dir=tmp_path)
+    result = _rejected_result(store)
+
+    with pytest.raises(AuditError):
+        decide(  # "张三" 就是申请人 —— 自己批自己，必须被拒
+            result, Decision.REJECTED, "张三", store=store, directory=NoSelfService()
+        )
+    assert store.load(result.audit_id).decision is None, "被拒的决定不得落盘"
+
+    decide(result, Decision.REJECTED, "李四", store=store, directory=NoSelfService())
+    assert store.load(result.audit_id).operator == "李四"

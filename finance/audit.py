@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from .guard import guard_narrative
+from .interfaces import InvoiceVerifier, OperatorDirectory
 from .models import (
     AuditResult,
     AuditState,
@@ -59,7 +60,7 @@ from .voucher import VoucherError, build_voucher
 STAGE_VALIDATE = [
     "R001", "R002", "R003", "R005", "R006",
     "R007", "R008", "R009", "R010", "R011",
-    "R015", "R016", "R017",
+    "R015", "R016", "R017", "R018",
 ]
 STAGE_HISTORY = ["R004", "R012"]
 STAGE_BUDGET = ["R014"]
@@ -97,6 +98,7 @@ async def run_audit(
     use_vision: bool = False,
     vision_timeout: int = 20,
     narrative_llm: Any = "auto",
+    verifier: InvoiceVerifier | None = None,
 ) -> AuditResult:
     """跑完一遍审核，返回停在 ``pending_review`` 的结果并落盘。
 
@@ -104,6 +106,9 @@ async def run_audit(
     批准或驳回只有 :func:`decide` 能做，而它必须由人调用。
 
     :param narrative_llm: ``"auto"`` 用默认模型；``None`` 完全不用模型（模板叙述）。
+    :param verifier: 发票查验平台适配器（见 ``finance/interfaces.py``）。
+        默认 ``None`` = 未接入查验平台，R018 跳过并注明"由人工核验" ——
+        **留接口，不假装检查过**。
     """
     from .extractor import extract
 
@@ -128,9 +133,26 @@ async def run_audit(
 
     history = store.history_view()
 
+    # ---- 发票查验（第三方接口，默认不接入）----
+    # 查验结果**无判定权** —— 只交给规则引擎的 R018 去判（见 interfaces.py）。
+    verification = verifier.verify(invoice) if verifier is not None else None
+    if verification is not None:
+        store.append_log(
+            result.audit_id,
+            {
+                "event": "verification",
+                "status": verification.status,
+                "reason": verification.reason,
+                "provider": verification.provider,
+            },
+        )
+
     # ---- 状态 2：静态校验 ----
     result.findings.extend(
-        evaluate(invoice, request, policy, history=history, only=STAGE_VALIDATE)
+        evaluate(
+            invoice, request, policy, history=history, only=STAGE_VALIDATE,
+            verification=verification,
+        )
     )
     result.state = AuditState.VALIDATED
     _log_stage(store, result, "validated", STAGE_VALIDATE)
@@ -198,6 +220,7 @@ def decide(
     store: AuditStore,
     override_reason: str = "",
     policy: PolicyBundle | None = None,
+    directory: OperatorDirectory | None = None,
 ) -> AuditResult:
     """人工决定 —— **系统之外唯一能推进状态的入口**。
 
@@ -218,6 +241,14 @@ def decide(
             )
         if result.decision is not None:
             raise AuditError(f"审核单 {result.audit_id} 已由 {result.operator} 做过决定")
+
+        # 岗位分离（生产必须接，见 finance/interfaces.py::OperatorDirectory）：
+        # 《企业内部控制基本规范》要求制单与审核不得同人。默认 directory=None
+        # = 未接入（操作人自由文本，README「合规边界」如实列明这个缺口）。
+        if directory is not None:
+            allowed, why = directory.can_decide(operator, result)
+            if not allowed:
+                raise AuditError(f"操作人「{operator}」不得决定本单：{why}")
 
         if result.is_overridden_now(decision) and not override_reason.strip():
             raise OverrideReasonRequired(

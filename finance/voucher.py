@@ -26,17 +26,29 @@ class VoucherError(Exception):
     """无法生成凭证（通常是科目无法归类）。由调用方决定降级策略。"""
 
 
-def input_tax_deductible(invoice: Invoice, policy: PolicyBundle) -> bool:
-    """这张票的进项税额**允许抵扣**吗？两个条件缺一不可：
+def input_tax_deductible(invoice: Invoice, request: ReimbursementRequest, policy: PolicyBundle) -> bool:
+    """这张票的进项税额**允许抵扣**吗？三个条件缺一不可：
 
     1. **专用发票** —— 普通发票的进项税额不可抵扣，税额随价税合计全额进费用；
     2. **本公司可抵扣** —— 一般纳税人（``rules.yaml`` 的
-       ``company.input_tax_deductible``）。小规模纳税人取得的发票同样不得抵扣。
+       ``company.input_tax_deductible``）。小规模纳税人取得的发票同样不得抵扣；
+    3. **费用用途可抵扣** —— 财税〔2016〕36号 附件1 第二十七条：购进的
+       **餐饮服务**、居民日常服务、娱乐服务的进项税额**不得抵扣**。
+       餐饮费取得专用发票也不得拆「进项税额」—— 严禁级的会计口径，
+       由科目表逐项声明（``accounts.yaml`` 的 ``input_tax_deductible``）。
 
-    还有第三条（应税用途）票面上看不出来，由人工复核 —— 系统只判前两条。
+    还有第四条（不属于集体福利、个人消费等）票面与申请单都看不出来，
+    由人工复核 —— 系统只判前三条。查不到费用类型时**保守返回 False**：
+    宁可少抵，不可错抵。
     """
-    is_special = "专用" in (invoice.invoice_type or "")
-    return bool(is_special and policy.input_tax_deductible)
+    if not policy.input_tax_deductible:
+        return False
+    if "专用" not in (invoice.invoice_type or ""):
+        return False
+    ctx = RuleContext(invoice=invoice, request=request, policy=policy)
+    expense_type, _ = _resolved_expense_type(ctx)
+    spec = next((s for s in policy.accounts if s.expense_type == expense_type), None)
+    return bool(spec.input_tax_deductible) if spec else False
 
 
 # 部门前缀替换：accounts.yaml 里科目默认挂"管理费用"，销售部应改挂"销售费用"
@@ -79,14 +91,16 @@ def build_voucher(
         借  应交税费-应交增值税-进项税额    93.40    ← 税额（仅专用发票可抵扣）
         贷  其他应付款-员工报销          1,650.00
 
-    进项税额要**同时满足两个条件**才允许单独成行：
+    进项税额要**同时满足三个条件**才允许单独成行：
 
     1. 票是**增值税专用发票**（普通发票的进项税额不可抵扣 —— 税额必须随
        价税合计**全额计入成本费用**，拆出去记「进项税额」是会计错误）；
     2. 本公司**可抵扣**（一般纳税人）。小规模纳税人取得的发票同样不得抵扣，
-       由 ``rules.yaml`` 的 ``company.input_tax_deductible`` 控制。
+       由 ``rules.yaml`` 的 ``company.input_tax_deductible`` 控制；
+    3. **费用用途可抵扣** —— 餐饮服务等法定不得抵扣的费用（财税〔2016〕36号
+       附件1 第二十七条），专票也不拆，由 ``accounts.yaml`` 逐项声明。
 
-    两个条件任一不满足 -> 单行写法：借费用（价税合计）/ 贷往来。
+    三个条件任一不满足 -> 单行写法：借费用（价税合计）/ 贷往来。
     票面缺「不含税金额」或「税额」时同样退回单行 —— 信息不足以拆。
 
     **不校验 net + tax == total** —— 那是 R013 的活，而且 R013 现在直接对
@@ -114,11 +128,12 @@ def build_voucher(
     net = invoice.amount
     tax = invoice.tax_amount
     tax_account = policy.input_tax_account
-    # 拆行三前提：① 专用发票 ② 本公司可抵扣 ③ 票面三项齐全且税额 > 0。
+    # 拆行四前提：① 专用发票 ② 本公司可抵扣 ③ 用途可抵扣（餐饮等法定排除）
+    # ④ 票面三项齐全且税额 > 0。
     # **不校验 net + tax == total** —— 那是 R013 的活。
     # 这里多写一句"合不上就退回单行"，R013 就永远看不到不合的情况了。
     if (
-        input_tax_deductible(invoice, policy)
+        input_tax_deductible(invoice, request, policy)
         and net is not None
         and tax is not None
         and invoice.total is not None
