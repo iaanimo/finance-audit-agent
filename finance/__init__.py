@@ -6,7 +6,7 @@
 分层
 ----
 - :mod:`finance.policy`    —— 制度加载（YAML 配置，不是提示词）
-- :mod:`finance.rules`     —— 17 条规则，**零 LLM**，判定权的唯一所在
+- :mod:`finance.rules`     —— 19 条规则，**零 LLM**，判定权的唯一所在
 - :mod:`finance.extractor` —— 从发票文件抽取字段（允许 LLM 参与，允许出错）
 - :mod:`finance.voucher`   —— 记账凭证草稿
 - :mod:`finance.guard`     —— LLM 输出护栏（叙述里的数字必须来自 findings）

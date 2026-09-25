@@ -402,9 +402,16 @@ def extract_from_xml(path: str | Path, source_file: str = "") -> Invoice:
     的三要素勾稽抓出来标冲突**，由人工按原件更正 —— 不猜。
     """
     p = Path(path)
+    if p.stat().st_size > _MAX_MEMBER_BYTES:
+        raise ExtractionError(f"XML 文件过大（{p.stat().st_size} 字节），拒绝全量读入")
     return _parse_invoice_xml(
         p.read_text(encoding="utf-8", errors="ignore"), source_file or p.name, "xml"
     )
+
+
+#: 解压护栏（A2：zip bomb —— 2MB 的包曾解出 4GB 峰值并 OverflowError 逃逸抽取层）
+_MAX_MEMBER_BYTES = 8 * 1024 * 1024      # 单个内嵌成员解压后上限
+_MAX_TOTAL_BYTES = 32 * 1024 * 1024      # 整包解压后累计上限
 
 
 def extract_from_ofd(path: str | Path, source_file: str = "") -> Invoice:
@@ -428,7 +435,20 @@ def extract_from_ofd(path: str | Path, source_file: str = "") -> Invoice:
                 )
             )
             last_exc: ExtractionError | None = None
+            total = 0
             for n in names:
+                info = zf.getinfo(n)
+                # **上限判断在读之前**：zip bomb 的杀伤力就在"读"那一下
+                if int(info.file_size) > _MAX_MEMBER_BYTES:
+                    raise ExtractionError(
+                        f"OFD 内嵌文件 {n} 解压后 {info.file_size} 字节，超过单文件上限"
+                        f"（{_MAX_MEMBER_BYTES}）—— 疑似解压炸弹，拒绝解析"
+                    )
+                total += int(info.file_size)
+                if total > _MAX_TOTAL_BYTES:
+                    raise ExtractionError(
+                        f"OFD 解压累计超过上限（{_MAX_TOTAL_BYTES}）—— 疑似解压炸弹，拒绝解析"
+                    )
                 try:
                     return _parse_invoice_xml(
                         zf.read(n).decode("utf-8", errors="ignore"),
@@ -438,6 +458,8 @@ def extract_from_ofd(path: str | Path, source_file: str = "") -> Invoice:
                 except ExtractionError as exc:
                     last_exc = exc
                     continue
+                except (OverflowError, MemoryError, OSError) as exc:  # 解压层炸出的都要收进抽取层契约
+                    raise ExtractionError(f"OFD 解压异常，疑似损坏或解压炸弹：{exc}") from exc
     except zipfile.BadZipFile as exc:
         raise ExtractionError(f"OFD 无法打开（不是有效 ZIP 容器）：{exc}") from exc
     raise ExtractionError(

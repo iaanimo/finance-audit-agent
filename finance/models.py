@@ -53,7 +53,15 @@ def parse_money(value: Any) -> Decimal:
             d = Decimal(cleaned)
         except InvalidOperation as exc:
             raise ValueError(f"无法解析金额: {value!r}") from exc
-    return d.quantize(CENT, rounding=ROUND_HALF_UP)
+        if not d.is_finite():
+            # "inf" / "NaN" 不是钱 —— 曾一路溜到 quantize 才炸，界面可触发 500
+            raise ValueError(f"金额必须是有限数值: {value!r}")
+    try:
+        return d.quantize(CENT, rounding=ROUND_HALF_UP)
+    except InvalidOperation as exc:
+        # 1e30 / 31 位整数这类超精度输入在 quantize 炸 ArithmeticError 家族 ——
+        # 统一转 ValueError（A3：曾逃逸成 500，从界面填个 1E+30 就能触发）
+        raise ValueError(f"金额超出可表示范围: {value!r}") from exc
 
 
 def money_eq(a: Any, b: Any) -> bool:
