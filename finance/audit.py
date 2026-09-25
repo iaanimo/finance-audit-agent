@@ -18,7 +18,8 @@
     等待人工决定            -> pending_review
     人工决定                -> approved / rejected
 
-前四态是**系统**走完的，第五态到第六态的跨越**只有人能做**——
+系统推进**前六态**（extracted -> … -> pending_review）；
+**approved / rejected 两个终态只有人能走**——
 这就是"人工闸门"，也是这个项目和"全自动 AI 审批"的分界线。
 
 每一步都往 ``.log.jsonl`` 追加一条审计事件（只追加，不改）。

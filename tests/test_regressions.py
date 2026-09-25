@@ -186,6 +186,23 @@ def test_readme_claims_match_code(policy):
     # ④ 旧账清零：六态实为八态、money_eq 不再被引为合规依据
     assert "六态" not in readme
     assert "money_eq" not in readme
+    # ⑤ **写死的"NN 条规则"全库守恒**：README + 源码注释 + 依赖说明，一处漂移即红。
+    #（9 号教训：代码注释 4 处「17 条规则」活了三轮，因为测试只扫了 README ——
+    #   大门守住了，后院没人看。）
+    # 措辞约定：「N 条规则」字样**只许表示规则总条数**；其他计数（覆盖数、命中数）
+    # 一律写成「N 条不同规则 / N 条命中」，否则会被本扫描误伤 —— 那是提醒你换个说法。
+    import re as _re
+
+    targets = [PROJECT_ROOT / "README.md", PROJECT_ROOT / "server.py",
+               PROJECT_ROOT / "requirements.txt"]
+    targets += sorted((PROJECT_ROOT / "finance").rglob("*.py"))
+    targets += sorted((PROJECT_ROOT / "finance" / "policies").glob("*.yaml"))
+    for path in targets:
+        text = path.read_text(encoding="utf-8")
+        for m in _re.finditer(r"(\d+)\s*条规则", text):
+            assert int(m.group(1)) == len(policy.rules), (
+                f"{path.name} 写死了「{m.group(0)}」（真实 {len(policy.rules)} 条）"
+            )
 
 
 def test_clause_parser_covers_bold_number_only_headings(policy):
@@ -201,8 +218,59 @@ def test_state_machine_wording_is_eight():
     # 只禁"六态状态机"这个旧说法 —— "第五态到第六态"这类正常措辞不许误伤
     assert "六态状态机" not in audit_src and "八态" in audit_src
     assert "六态" not in models_src
+    # 10 号：改成"八态"后漏改的旧计数句 —— 同段新旧口径打架
+    assert "前四态" not in audit_src, "旧计数句残留（系统实走前六态）"
+    assert "第五态到第六态" not in audit_src
+    assert "前六态" in audit_src
 
 
 def test_every_checker_registered(policy):
     for spec in policy.rules:
         assert spec.checker in CHECKERS
+
+
+# ---------------------------------------------------------------------------
+# A2 / A3：别人一碰就炸的两个口子
+# ---------------------------------------------------------------------------
+
+
+def test_a3_parse_money_rejects_non_finite_and_huge():
+    """inf / NaN / 1e30 / 31 位整数 —— 一律 ValueError（曾逃逸 ArithmeticError -> 500，
+    从界面金额框填个 1E+30 就能触发）。"""
+    for bad in ("1e30", "inf", "-inf", "NaN", "9" * 31):
+        with pytest.raises(ValueError):
+            parse_money(bad)
+
+
+def test_a3_server_turns_bad_amount_into_400():
+    from fastapi.testclient import TestClient
+
+    import server
+
+    client = TestClient(server.app)
+    resp = client.post(
+        "/api/audit/run",
+        json={
+            "filename": "x.pdf",
+            "content_b64": base64.b64encode(b"%PDF-1.4\n%%EOF").decode(),
+            "request": {
+                "applicant": "张三", "department": "技术部",
+                "expense_type": "住宿费", "amount": "1e30",
+                "reason": "x", "submit_date": "2026-09-18",
+            },
+        },
+    )
+    assert resp.status_code == 400, "烂金额必须 400，不是 500"
+
+
+def test_a2_ofd_bomb_is_rejected(tmp_path):
+    """zip bomb：解压上限判断必须在**读之前** —— 2MB 的包曾解出 4GB 峰值。"""
+    import zipfile
+
+    from finance.extractor import ExtractionError, extract
+
+    bomb = tmp_path / "bomb.ofd"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Doc/Big.xml", b"\0" * (9 * 1024 * 1024))   # 解压后 9MB > 单文件上限
+    with pytest.raises(ExtractionError):
+        extract(bomb)
