@@ -4,7 +4,7 @@
 启动::
 
     ./.venv/Scripts/python.exe server.py
-    # 浏览器打开 http://127.0.0.1:8000/audit
+    # 浏览器打开 http://127.0.0.1:8100/audit
 
 **这条链路刻意不经过任何 agent 循环，也不给模型任何工具。**
 
@@ -559,7 +559,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="财务报销审核受控 Agent")
     parser.add_argument("--host", default="127.0.0.1", help="绑定地址（0.0.0.0 可局域网访问）")
-    parser.add_argument("--port", type=int, default=8000, help="端口")
+    # 默认 8100 而非 8000：8000 太常用，容易被本机其它本地服务先占上
+    parser.add_argument("--port", type=int, default=8100, help="端口")
     parser.add_argument(
         "--demo",
         action="store_true",
