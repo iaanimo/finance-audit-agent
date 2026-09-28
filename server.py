@@ -190,7 +190,12 @@ async def audit_sample_file(key: str):
     rel = str(spec.get("pdf") or "")
     path = (SAMPLE_DIR / rel).resolve() if rel else (SAMPLE_DIR / "pdf" / f"{safe}.pdf").resolve()
     # 防目录穿越：清单被改坏/塞进 ../ 时也跳不出 samples/（双保险）
-    if not str(path).startswith(str(SAMPLE_DIR.resolve()) + "\\") and path.parent != SAMPLE_DIR.resolve():
+    # ⚠️ 原写法是 `str(path).startswith(str(SAMPLE_DIR) + "\\")` —— 那个 "\\" 是
+    # **Windows 分隔符**。Linux 上 str(path) 用 "/"，startswith 恒为 False，于是短路失效、
+    # 退化到第二个条件 `path.parent != samples/`，把 pdf/、xml/ 子目录下的样本全判 404。
+    # 症状很有欺骗性：windows CI 绿、ubuntu CI 红，本地（Windows）永远复现不出来。
+    # 改用 is_relative_to()：与分隔符无关，两个平台同一语义。
+    if not path.is_relative_to(SAMPLE_DIR.resolve()):
         raise HTTPException(status_code=404, detail=f"样本不存在：{key}")
     if not path.is_file():
         raise HTTPException(status_code=404, detail=f"样本不存在：{key}")
