@@ -1,7 +1,5 @@
 # 财务报销审核受控 Agent
 
-![CI](https://github.com/iaanimo/finance-audit-agent/actions/workflows/tests.yml/badge.svg)
-
 > **把 LLM 关进笼子里的报销审核流程。**
 >
 > 通用 agent 项目人人都在做。这个项目的特别之处在于它处理的业务**错不起** ——
