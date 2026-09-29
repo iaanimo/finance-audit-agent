@@ -2,10 +2,7 @@
 
 ![CI](https://github.com/iaanimo/finance-audit-agent/actions/workflows/tests.yml/badge.svg)
 
-> **把 LLM 关进笼子里的报销审核流程。**
->
-> 通用 agent 项目人人都在做。这个项目的特别之处在于它处理的业务**错不起** ——
-> 财务审核的结论必须可复现、可追溯、可审计。
+财务报销审核 Agent —— LLM 负责抽取与叙述，**审核判定由 19 条纯 Python 规则完成**：结论可复现、可追溯、可审计。
 
 一句话概括设计原则：
 
