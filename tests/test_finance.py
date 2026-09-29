@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 import struct
 import zlib
 from datetime import date
@@ -196,6 +197,62 @@ def test_inv1c_severity_aligns_with_policy_wording(policy):
             assert soft, (
                 f"{rule.rule_id} 定为 WARN，但制度原文里没有'提交人工复核'这类软措辞"
             )
+
+
+# 规则 → 它在条款原文里引用的限额键。
+# 条款原文不只是给人看的：guard.allowed_numbers() 会把它的数字收进"模型可引用"
+# 白名单，审核结论里能不能说出某个金额取决于它。所以条款文本一旦与 limits 漂移，
+# 会同时污染两处 —— 审核员看到的制度原文、以及模型能不能引用正确的限额。
+CLAUSE_LIMIT_KEYS: dict[str, tuple[str, ...]] = {
+    "R003": ("invoice_max_age_days",),
+    "R005": ("local_transport_per_trip",),
+    "R006": ("meal_per_person",),
+    "R007": ("hotel_tier1_per_night", "hotel_other_per_night"),
+    "R008": ("office_supplies_per_invoice",),
+}
+
+
+def test_inv1d_clause_text_limit_numbers_match_limits(policy):
+    """条款原文里引用的限额数字，必须等于 limits 里的值。
+
+    这是 inv1「规则表 <-> 制度原文 <-> 代码，三方缺一即失败」的补全：
+    原先把条款号和 checker 名对上了，但**条款正文里的数字**没管。
+    于是改 rules.yaml 的 limits 却忘了同步条款文本，三方依然"一致"——
+    直到审核员发现制度原文写着 600、系统按 700 判。
+    """
+    by_id = {r.rule_id: r for r in policy.rules}
+    for rule_id, keys in CLAUSE_LIMIT_KEYS.items():
+        assert rule_id in by_id, f"条款限额表引用了不存在的规则 {rule_id}"
+        text = by_id[rule_id].clause_text
+        numbers = set(re.findall(r"\d+", text))
+        for key in keys:
+            assert key in policy.limits, f"limits 里没有 {key}（{rule_id} 的条款引用了它）"
+            value = policy.limits[key]
+            assert str(value) in numbers, (
+                f"{rule_id} 的条款原文与 limits 漂移：limits['{key}'] = {value}，"
+                f"但原文里找不到这个数字 —— 「{text[:50]}…」"
+            )
+
+
+def test_inv1e_limits_keys_read_by_rules_all_exist(policy):
+    """rules.py 读取的每个限额键，都必须在 limits 里真实存在。
+
+    rules.py 用的是 `limits.get(key, <硬编码默认值>)`。键被改名或删掉时不会报错，
+    会静默退回那个默认值 —— 而默认值是**第二份副本**，可能已经和条款原文不一致。
+    这条把「键必须存在」钉住，那些默认值就永远不该被用到。
+    """
+    required = {
+        "city_tier1",
+        "hotel_tier1_per_night",
+        "hotel_other_per_night",
+        "local_transport_per_trip",
+        "meal_per_person",
+        "office_supplies_per_invoice",
+        "invoice_max_age_days",
+        "serial_invoice_max_gap",
+    }
+    missing = sorted(required - set(policy.limits))
+    assert not missing, f"rules.py 会读取这些 limits 键，但 rules.yaml 里没有：{missing}"
 
 
 # ==========================================================================
