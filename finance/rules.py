@@ -43,7 +43,7 @@ from .models import (
     parse_chinese_amount,
     parse_money,
 )
-from .interfaces import FAILED, UNAVAILABLE, VERIFIED, VerificationResult
+from .interfaces import FAILED, VERIFIED, VerificationResult
 from .policy import PolicyBundle, RuleSpec
 
 # --------------------------------------------------------------------------

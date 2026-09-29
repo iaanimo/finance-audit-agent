@@ -33,7 +33,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .models import AuditResult, AuditState, Decision
+from .models import AuditResult, Decision
 from .rules import HistoryHit
 
 AUDIT_FILE_SUFFIX = ".json"

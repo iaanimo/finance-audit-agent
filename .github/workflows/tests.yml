@@ -31,6 +31,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: 静态检查（ruff，只查 F 类）
+        # 只查「正确性」那一层：未定义名 / 未使用 import / f-string 缺占位符。
+        # 规则见仓库根的 ruff.toml —— 刻意不开风格规则、不上 mypy。
+        # 这一步补的是测试看不见的一层：类型注解里的名字、以及被遮蔽的导入。
+        # 用 `python -m ruff` 而不是裸 `ruff`：两个 runner 上都不用操心 PATH。
+        run: |
+          python -m pip install ruff
+          python -m ruff check .
+
       - name: 单元测试（含四条不变量）
         # PYTHONIOENCODING：报告里有 ✅ 这类字符，Windows runner 默认 GBK 会炸
         env:

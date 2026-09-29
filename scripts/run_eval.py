@@ -152,7 +152,9 @@ def check_extraction(invoice, spec: dict) -> tuple[bool, list[str]]:
     if not want:
         return False, ["样本清单里没有 invoice 段，无法核对抽取字段"]
 
-    for field, label, is_money in (
+    # 循环变量叫 attr 而不是 field：field 在本模块顶部是从 dataclasses 导入的
+    # 函数（第 67 行在用），重名会把它遮蔽掉。
+    for attr, label, is_money in (
         ("invoice_number", "发票号码", False),
         ("invoice_type", "发票类型", False),
         ("buyer_name", "购买方名称", False),
@@ -160,10 +162,10 @@ def check_extraction(invoice, spec: dict) -> tuple[bool, list[str]]:
         ("item_name", "项目名称", False),
         ("total", "价税合计", True),
     ):
-        if field not in want:
+        if attr not in want:
             continue
-        expected = want[field]
-        actual = getattr(invoice, field)
+        expected = want[attr]
+        actual = getattr(invoice, attr)
         if actual is None or actual == "":
             notes.append(f"{label}抽取为空（样本定义 {expected!r}）")
             continue

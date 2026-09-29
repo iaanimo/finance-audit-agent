@@ -42,7 +42,6 @@ from .models import (
     NarrativeSource,
     ReimbursementRequest,
     Severity,
-    SuggestedStatus,
 )
 from .policy import PolicyBundle, load_policy_bundle
 from .rules import aggregate, evaluate, summarize_findings

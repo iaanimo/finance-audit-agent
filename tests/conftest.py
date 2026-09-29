@@ -51,7 +51,6 @@ def temp_project_root(tmp_path, monkeypatch):
     resolve_data_path (used by file_ops and the agent's report writing) reads
     settings via tools.file_ops.get_settings, so patching that is enough.
     """
-    import tools.file_ops
 
     class _FakeSettings:
         def __init__(self, root: Path):
