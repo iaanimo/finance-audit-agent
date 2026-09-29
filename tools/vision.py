@@ -7,7 +7,7 @@
 
 用法::
 
-    ./.venv/Scripts/python.exe -m tools.vision <图片路径> [--prompt "想问的问题"]
+    python -m tools.vision <图片路径> [--prompt "想问的问题"]
 
 API Key 来源（按优先级，与 :func:`_load_api_key` 的实现一致）::
 
@@ -34,8 +34,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
-BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-MODEL = "qwen-vl-max"
+# 接入点可换（别家 OpenAI 兼容接口也能用），默认通义千问 DashScope
+BASE_URL = os.getenv("VISION_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
 DEFAULT_PROMPT = "请详细描述这张图片的内容，包括画面主体、文字、布局和值得注意的细节。"
 
 

@@ -64,13 +64,18 @@ start.bat            # Windows 双击
 #    http://127.0.0.1:8100/audit
 ```
 
-手动方式：
+手动方式（全平台通用）：
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python.exe -m pip install -r requirements.txt
-cp .env.example .env        # 填入 API Key —— 不填也能跑，见下
-.venv/Scripts/python.exe server.py
+
+# 激活虚拟环境（二选一）
+.venv\Scripts\activate        # Windows
+source .venv/bin/activate     # macOS / Linux
+
+pip install -r requirements.txt
+cp .env.example .env          # 填入 API Key —— 不填也能跑，见下（Windows 用 copy）
+python server.py
 ```
 
 > **API Key 是可选的。** 不配叙事模型 Key，审核结论**完全不受影响**，
@@ -82,7 +87,7 @@ cp .env.example .env        # 填入 API Key —— 不填也能跑，见下
 `--demo` 是一个启动开关，只开放一件事：**「清空演示数据」接口**（`start.bat` 已经带了）。
 
 ```bash
-.venv/Scripts/python.exe server.py --demo
+python server.py --demo       # 激活 venv 后
 ```
 
 它解决的是**反复调试**的问题：同一张样本跑第二遍时，单据会留在查重台账里，
@@ -190,7 +195,7 @@ R012 连号是**怀疑**不是**事实** —— 系统不应该替人给报销�
 ## 评测
 
 ```bash
-.venv/Scripts/python.exe scripts/run_eval.py --report eval/report.md
+python scripts/run_eval.py --report eval/report.md
 ```
 
 16 张样本票跑一遍，逐条核对「预期命中」vs「实际命中」。**完全离线**：
@@ -492,7 +497,7 @@ tests/test_regressions.py    评测点名的残留逐条销项 + README 一致�
 ## 测试
 
 ```bash
-.venv/Scripts/python.exe -m pytest      # 全部通过 —— 用例数以 pytest 输出为准
+python -m pytest      # 全部通过 —— 用例数以 pytest 输出为准
       #（数字写死必漂移，已被复检连抓三轮；规则条数与文档一致性
       #  由 tests/test_regressions.py 挂红守住）
 ```

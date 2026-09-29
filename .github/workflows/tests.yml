@@ -37,7 +37,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m pytest -q
 
-      - name: 离线评测（13 张样本，退出码即结论）
+      - name: 离线评测（16 张样本 = 13 PDF + 3 XML，退出码即结论）
         # 这一步**不需要** Edge：样本 PDF 已随仓库提交，评测只读它们。
         # 误报、严重度不符、抽取不符都会让它返回非 0。
         env:
