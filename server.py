@@ -36,6 +36,8 @@ from pydantic import BaseModel, Field
 from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
 from finance.audit import AuditError, OverrideReasonRequired, decide, run_audit
+from finance.advice import suggest_advice
+from finance.policy import load_policy_bundle
 from finance.store import AuditStore
 from tools.file_ops import resolve_data_path
 
@@ -383,7 +385,17 @@ async def audit_extract(req: ExtractRequest):
 
 @app.get("/api/audit/{audit_id}")
 async def audit_detail(audit_id: str):
-    return _load_or_404(audit_id).to_json_dict()
+    """单据详情。
+
+    ``advice`` 是**派生字段**：由命中规则的 evidence 现算出来（见
+    ``finance/advice.py``），不落库、不参与判定、不影响状态机 —— 它只回答
+    「这张单要改成什么样才能过」，把"驳回"变成可执行的动作。
+    """
+    result = _load_or_404(audit_id)
+    return {
+        **result.to_json_dict(),
+        "advice": suggest_advice(result.findings, policy=load_policy_bundle()),
+    }
 
 
 @app.get("/api/audit/{audit_id}/log")

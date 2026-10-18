@@ -783,6 +783,23 @@ function renderResult(r) {
 
   var html = '<div class="card"><div class="body">' + banner + '</div></div>';
 
+  /* 补正建议：把"哪里不合规"翻成"怎么改"。只读派生，不进判定 */
+  var advice = r.advice || [];
+  if (advice.length) {
+    html += '<div class="card" style="margin-top:14px"><h2>补正建议（怎么改才能过）</h2>' +
+      '<div class="body">' + advice.map(function (a) {
+        return '<div style="display:flex;gap:10px;padding:7px 0;border-bottom:1px solid #eef1f4">' +
+          '<div style="flex:0 0 78px;font-family:ui-monospace,Consolas,monospace;' +
+            'font-size:12px;color:#0b5f54;padding-top:2px">' + esc(a.rule_id) + '</div>' +
+          '<div style="flex:1;font-size:13px;line-height:1.6">' +
+            '<b style="color:' + (a.kind === '可补正' ? '#0b5f54' : '#a15c00') + '">' +
+            esc(a.kind) + '</b>　' + esc(a.text) + '</div></div>';
+      }).join('') +
+      '<div style="margin-top:8px;font-size:12px;color:#8a939d">' +
+      '建议只给合规补正路径；系统不提供规避审核的做法，也不改变任何判定。</div>' +
+      '</div></div>';
+  }
+
   /* 发票要素 */
   var inv = r.invoice;
   html += '<div class="card" style="margin-top:14px"><h2>② 发票要素（由文本层抽取）</h2>' +
