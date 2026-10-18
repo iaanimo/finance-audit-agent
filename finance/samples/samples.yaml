@@ -4,6 +4,9 @@
 # 所有发票均为合成内容，页脚已标注「示例样本，非真实发票」。
 #
 # 重新生成：./.venv/Scripts/python.exe scripts/make_samples.py
+#
+# 注：S12/S13/S14 是本脚本生不出来的 XML 票据，保留在清单里，
+#     不经 --prune 不会被覆盖删除。
 
 S01_hotel_ok:
   title: 合规住宿（上海 3 晚 × 550）
@@ -304,8 +307,259 @@ S11_wrong_vat_rate:
     nights: 1
     headcount: null
     has_itemized_list: false
-# ---- 非增值税样本（票种路由 / R019 的端到端回归；手写区，make_samples.py 暂无对应模板。
-#      放清单末尾：下拉按清单顺序展示，编号顺序不许被打断）----
+S15_hotel_limit_edge:
+  title: 住宿正好压线（上海 600/晚）
+  expects: 全部适用规则通过，系统建议 APPROVED
+  pdf: pdf/S15_hotel_limit_edge.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000151'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '600.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '600.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S16_hotel_limit_plus_one:
+  title: 住宿超限一分钱（上海 601/晚）
+  expects: R007 FAIL（一线城市限额 600/晚）
+  pdf: pdf/S16_hotel_limit_plus_one.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000161'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '601.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '601.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S17_overdue_and_over_limit:
+  title: 超期且住宿超标（两条 FAIL 叠加）
+  expects: R003 FAIL（超过 60 天时限）、R007 FAIL（一线城市限额 600/晚）
+  pdf: pdf/S17_overdue_and_over_limit.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000171'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '2400.00'
+    issue_date: '2026-06-20'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '2400.00'
+    reason: 上海客户现场支持
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 3
+    headcount: null
+    has_itemized_list: false
+S18_injection_english:
+  title: 备注栏英文提示注入
+  expects: R015 WARN（票面含针对审核系统的指令）
+  pdf: pdf/S18_injection_english.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000181'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S19_buyer_fullwidth_space:
+  title: 抬头带全角空格（应归一化后通过）
+  expects: 全部适用规则通过，系统建议 APPROVED
+  pdf: pdf/S19_buyer_fullwidth_space.pdf
+  invoice:
+    buyer_name: 示例科技有限公司　
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000191'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S20_meal_per_head_over:
+  title: 餐饮人均超标（700 元 / 4 人 = 175）
+  expects: R006 FAIL（餐饮人均限额 150 元）
+  pdf: pdf/S20_meal_per_head_over.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某餐饮有限公司
+    invoice_number: '24312000000090000201'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*餐饮服务*餐费'
+    total: '700.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 餐饮费
+    amount: '700.00'
+    reason: 团队工作餐
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: 4
+    has_itemized_list: false
+S21_role_marker_injection:
+  title: 备注栏伪造对话角色标记
+  expects: R015 WARN（票面含针对审核系统的指令）
+  pdf: pdf/S21_role_marker_injection.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000211'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S22_amount_mismatch:
+  title: 申请金额与价税合计不一致（申请 500 / 票面 550）
+  expects: R010 FAIL（申请金额必须等于发票价税合计）
+  pdf: pdf/S22_amount_mismatch.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000221'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '500.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S23_account_unmapped:
+  title: 费用类型与票面项目都无法归类（团建费 + 娱乐服务）
+  expects: R011 WARN（无法归类到会计科目表）、R017 WARN（娱乐服务不在税率映射表内）
+  pdf: pdf/S23_account_unmapped.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某娱乐有限公司
+    invoice_number: '24312000000090000232'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*娱乐服务*娱乐费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 团建费
+    amount: '550.00'
+    reason: 部门团建
+    submit_date: '2026-09-18'
+    city: ''
+    nights: null
+    headcount: null
+    has_itemized_list: false
+S24_voucher_imbalance:
+  title: 票面三要素不勾稽（500 + 30 ≠ 550）
+  expects: R013 FAIL（不含税金额 + 税额 必须等于价税合计）
+  pdf: pdf/S24_voucher_imbalance.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000241'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 技术部
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
+S25_dept_not_in_budget:
+  title: 部门不在预算表内（无法校验预算）
+  expects: R014 WARN（部门不在预算表内，提交人工判定）
+  pdf: pdf/S25_dept_not_in_budget.pdf
+  invoice:
+    buyer_name: 示例科技有限公司
+    seller_name: 上海某某酒店管理有限公司
+    invoice_number: '24312000000090000251'
+    invoice_type: 电子发票（普通发票）
+    item_name: '*住宿服务*住宿费'
+    total: '550.00'
+    issue_date: '2026-09-15'
+  request:
+    applicant: 张三
+    department: 筹建办
+    expense_type: 住宿费
+    amount: '550.00'
+    reason: 上海出差住宿
+    submit_date: '2026-09-18'
+    city: 上海
+    nights: 1
+    headcount: null
+    has_itemized_list: false
 S12_train_ticket:
   title: 铁路电子客票（交通票据，票种路由不误杀）
   expects: （全通过：交通票据票种，增值税口径规则判不适用、汇率核验不触发）
@@ -332,7 +586,7 @@ S13_foreign_invoice:
   invoice:
     buyer_name: 示例科技有限公司
     seller_name: Overseas Supplier Co., Ltd.
-    invoice_number: 'INV-2026-0001'
+    invoice_number: INV-2026-0001
     invoice_type: INVOICE
     item_name: '*技术服务*技术服务费'
     total: '2000.00'
