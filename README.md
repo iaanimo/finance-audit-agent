@@ -314,7 +314,39 @@ python scripts/measure_llm_judge.py --repeat 3 --report eval/llm-judge-report.md
 **temperature=0 下同一张票仍有 3 张出现结论漂移**，这不是抖动，是概率模型的性质。
 
 这就是本项目「LLM 只读不判」的实证依据。第三路（小模型 SFT 后判定）需要 GPU
-与微调环境，未跑，报告里留空位而不编数字。
+与微调环境，**未跑，报告里留空位而不编数字**。
+
+### 第三路怎么补：把规则引擎当老师
+
+没有真实报销数据，也不想拿"我觉得"当训练集 —— 那就让**规则引擎当标注器**：
+
+```bash
+python scripts/build_sft_data.py --per-type 40 --seed 20261018
+# -> data/sft/train.jsonl（720 条）/ val.jsonl（80 条）/ stats.md
+```
+
+- **标签来源** = `finance.rules.evaluate` + `aggregate`，与线上判定同源，不是另写一份判断；
+- **18 种场景**（合规 + 17 类违规），合规样本加权，三类结论都在（通过 166 / 驳回 439 / 转人工 195）；
+- **提示词与评测逐字一致**（`finance/judge_prompt.py` 唯一来源）—— 否则训练/评测不同分布，分数不作数；
+- **评测集 27 张不参与训练**，脚本会断言发票号码不重叠；
+- 数据落在 `data/`（已 gitignore），不占仓库，随时可重造。
+
+训练与评分的接线（**未在本机执行：没有 GPU**，只写清接法，不编结果）：
+
+```bash
+# 1) 训练（LLaMA-Factory / Unsloth 二选一，读 messages 格式的 JSONL）
+llamafactory-cli train examples/train_lora/qwen2.5_lora_sft.yaml \
+    dataset_dir data/sft dataset=train.jsonl eval_dataset=val.jsonl
+
+# 2) 用同一套指标评它（第三路），与规则、通用大模型并排
+python scripts/measure_llm_judge.py --base-url http://127.0.0.1:8000/v1 \
+    --model qwen2.5-1.5b-lora-audit --api-key dummy \
+    --report eval/llm-judge-sft-report.md
+```
+
+这一步的意义写清楚：微调不是为了让模型比规则更准（**不可能**，规则是精确比较），
+而是把规则的判定能力蒸馏成一个**能离线的模型**，用在规则还没覆盖的新场景上，
+或作为规则的"第二意见"。判定权依旧不在模型手里。
 
 ### 税率校验为什么放行 3%
 
