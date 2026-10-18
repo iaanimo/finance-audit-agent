@@ -261,6 +261,38 @@ python scripts/run_eval.py --report eval/report.md
 
 ---
 
+## 叙述层护栏 —— 实测，不是自说自话
+
+`run_eval.py` 证明的是「规则判定可复现」，它证明不了「护栏真的在拦东西」。
+后者只能真调模型：
+
+```bash
+python scripts/measure_guard.py --repeat 2 --report eval/guard-report.md
+```
+
+判定环节仍然零 LLM（`narrative_llm=None`），脚本只把**同一份 findings** 的提示词
+发给模型，再把它的输出分别过两道护栏，逐条记录放行 / 编数字被拦 / 结论相反被拦。
+
+三组结果（数字以 `eval/guard-report*.md` 为准，不在这里手抄）：
+
+| 组 | 条件 | 调用 | 越界被拦 |
+|---|---|---|---|
+| A 完整提示词 | 有「只能引用已出现过的数字」这条硬约束 | 54 | **0** |
+| B 数字遮掉 | 提示词里所有数字替换成 ◼ | 27 | **0**（模型干脆不写数字） |
+| C 拿掉约束 | 删掉硬约束那一段 | 27 | **2（7.4%）**，编出票面上不存在的 `1001`、`1002`、`90` |
+
+读法：A 说明「这套提示词 + temperature=0 下模型 54 次没有越界」；
+C 说明那条约束不是客套话 —— **去掉它，27 次里就有 2 次开始报票面上没有的数字**，
+护栏是第二道防线而不是唯一一道。
+
+> 这轮实测还撞出一个静默缺陷：限额类规则的 `evidence` 里带 `Decimal`，
+> `narrative_evidence_block()` 的 `json.dumps` 会抛异常，异常被
+> `audit._make_narrative` 的 `try/except` 吞掉 —— 症状是「这类单据的审核意见
+> 永远是模板文字，模型一次没被用上」，日志里看不出来。已修（`default=str`）
+> 并补了 `tests/test_narrative_block.py`。
+
+---
+
 ## 几个值得说的设计取舍
 
 ### 税率校验为什么放行 3%

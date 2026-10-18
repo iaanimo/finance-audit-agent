@@ -482,6 +482,12 @@ class AuditResult(BaseModel):
 
         刻意带上 evidence —— 让模型看见"实际值/期望值"，它就不需要编数字；
         而一旦它编了，护栏会抓到。
+
+        ⚠️ ``default=str`` 不是保险措施，是**必需**：限额类规则的 evidence 里
+        带 ``Decimal``（金额来自 ``parse_money``），而 ``json.dumps`` 不认 Decimal。
+        过去这里直接崩，崩在 ``audit._make_narrative`` 的 try/except 里被静默吞掉 ——
+        症状是"这类单据的审核意见永远是模板文字，模型一次没被用上"，而日志里
+        看不出来。实测（``scripts/measure_guard.py``）才把它撞出来。
         """
         import json as _json
 
@@ -490,7 +496,7 @@ class AuditResult(BaseModel):
             lines.append(f"[{f.rule_id}] 制度{f.clause} {f.title} -> {f.severity.value}")
             lines.append(f"    {f.message}")
             if f.evidence:
-                lines.append(f"    证据: {_json.dumps(f.evidence, ensure_ascii=False)}")
+                lines.append(f"    证据: {_json.dumps(f.evidence, ensure_ascii=False, default=str)}")
         return "\n".join(lines)
 
     def to_json_dict(self) -> dict:
