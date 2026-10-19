@@ -10,13 +10,11 @@
 
 from __future__ import annotations
 
-from datetime import date
-from decimal import Decimal
 
 import pytest
 
 from finance.advice import suggest_advice
-from finance.models import AuditFinding, Invoice, Severity
+from finance.models import AuditFinding, Severity
 
 
 def _f(rule_id: str, **ev) -> AuditFinding:
