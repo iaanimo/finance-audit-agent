@@ -72,7 +72,8 @@ class ErpDocument(BaseModel):
     doc_date: str = ""
     total_amount: str | float = ""
     currency_code: str = "CNY"
-    partner: ErpPartner = Field(default_factory=ErpPartner)
+    # None / 缺省均接受（真连实测：ERP 无对手方时显式送 null——接收方宽容）
+    partner: ErpPartner | None = None
     lines: list[ErpLine] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 
@@ -106,17 +107,18 @@ def _to_models(doc: ErpDocument) -> tuple[Invoice, ReimbursementRequest]:
         raise _bad_request(f"total_amount 不合法：{doc.total_amount!r}") from exc
 
     item_name = ",".join(line.material_code for line in doc.lines if line.material_code)
+    partner_name = doc.partner.name if doc.partner else ""
     invoice = Invoice(
         invoice_number=doc.doc_no,
         issue_date=doc_date,
-        seller_name=doc.partner.name,
+        seller_name=partner_name,
         buyer_name=str(doc.extra.get("buyer_name", "")),
         item_name=item_name or doc.doc_type,
         total=amount,
         raw_text="",  # 集成面无原文——证据链根在 ERP 侧单据
     )
     request = ReimbursementRequest(
-        applicant=str(doc.extra.get("applicant") or doc.partner.name),
+        applicant=str(doc.extra.get("applicant") or partner_name),
         department=str(doc.extra.get("department", "")),
         expense_type=str(doc.extra.get("expense_type") or doc.doc_type),
         amount=amount,

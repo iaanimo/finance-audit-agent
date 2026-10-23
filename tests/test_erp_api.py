@@ -95,3 +95,10 @@ def test_unsupported_dto_version_rejected() -> None:
     resp = client.post("/audit", json=bad)
     assert resp.status_code == 400
     assert resp.json()["detail"]["rule_version"] == erp_api.RULE_VERSION
+
+
+def test_null_partner_tolerated() -> None:
+    """真连实测裂缝修复：ERP 无对手方时显式送 partner=null——接收方必须宽容。"""
+    resp = client.post("/audit", json=_minimal_doc(partner=None))
+    assert resp.status_code == 200
+    assert resp.json()["rule_version"] == erp_api.RULE_VERSION
