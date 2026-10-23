@@ -37,6 +37,7 @@ from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
 from finance.audit import AuditError, OverrideReasonRequired, decide, run_audit
 from finance.advice import suggest_advice
+from finance.erp_api import router as _erp_router
 from finance.policy import load_policy_bundle
 from finance.store import AuditStore
 from tools.file_ops import resolve_data_path
@@ -65,6 +66,10 @@ def setup_logging() -> None:
     )
 
 app = FastAPI(title="财务报销审核受控 Agent", docs_url="/docs")
+
+# ERP 无状态审核接口（G3-4b 集成壳）：POST /audit + GET /version
+# ——DTO 进结论出、不落 store、零 LLM，契约见 finance/erp_api.py
+app.include_router(_erp_router)
 
 AUDIT_STORE = AuditStore()
 SAMPLE_DIR = HERE / "finance" / "samples"
