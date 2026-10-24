@@ -23,11 +23,15 @@ L1 动作（催办、要材料、通知审核台）必须有地方落地，但**
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# 复用 store 的文件锁实现：同一套 Windows/POSIX 兼容逻辑，不写第三份。
+from finance.store import _lock_file, _unlock_file
 
 #: 收件箱文件后缀。每人一个 JSONL，行内一条消息。
 INBOX_SUFFIX = ".inbox.jsonl"
@@ -82,11 +86,14 @@ class Inbox:
         subject: str,
         body: str,
         dedupe_key: str = "",
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """投一条消息。**幂等**：同键已存在则返回既有消息，不重复投。
 
         :param dedupe_key: 幂等键。runtime 用 ``f"{audit_id}:{kind}"``，
             这样"崩溃后重放"不会给同一个人发第二遍同样的催办。
+        :param extra: 结构化附加字段（如 ``{"warnings": [...]}``），
+            给 UI 与后续处理用；正文里也会有人话版本。
         :raises ValueError: ``kind`` 不在白名单（宁可报错，也不许塞进资金类通知）
         """
         if kind not in KINDS:
@@ -96,36 +103,47 @@ class Inbox:
         if not str(audit_id).strip():
             raise ValueError("消息必须挂在一张审核单上 —— 脱离单据的通知无法追溯")
 
-        existing = self.find(to=to, audit_id=audit_id, kind=kind, dedupe_key=dedupe_key)
-        if existing is not None:
-            return existing
+        path = self._path(to)
+        # 幂等检查与追加必须在同一把锁里：两个进程同时投同一条，
+        # 各自"查无此条"再各写一行，幂等就失效了。
+        with self._locked(path):
+            existing = self.find(
+                to=to, audit_id=audit_id, kind=kind, dedupe_key=dedupe_key
+            )
+            if existing is not None:
+                return existing
 
-        record = {
-            "id": uuid.uuid4().hex[:10],
-            "ts": _now(),
-            "to": to,
-            "kind": kind,
-            "audit_id": audit_id,
-            "subject": subject,
-            "body": body,
-            "dedupe_key": dedupe_key,
-            "read_at": None,
-            # 已读 ≠ 已处理：打开消息是"看"，做出决定才是"办完"。
-            "resolved_at": None,
-            "resolved_by": "",
-        }
-        self._append(self._path(to), record)
-        return record
+            record = {
+                "id": uuid.uuid4().hex[:10],
+                "ts": _now(),
+                "to": to,
+                "kind": kind,
+                "audit_id": audit_id,
+                "subject": subject,
+                "body": body,
+                "dedupe_key": dedupe_key,
+                "read_at": None,
+                # 已读 ≠ 已处理：打开消息是"看"，做出决定才是"办完"。
+                "resolved_at": None,
+                "resolved_by": "",
+                "extra": dict(extra) if extra else {},
+            }
+            self._append(path, record)
+            return record
 
     def mark_read(self, who: str, message_id: str) -> bool:
         """把某条消息标为已读。**追加一条状态行**，不原地改文件 ——
         与审计日志同一原则：轨迹不覆盖，只追加。"""
-        target = next((m for m in self._read_all(who) if m.get("id") == message_id), None)
-        if target is None or target.get("read_at"):
-            return False
-        target["read_at"] = _now()
-        self._append(self._path(who), target)
-        return True
+        path = self._path(who)
+        with self._locked(path):
+            target = next(
+                (m for m in self._read_all(who) if m.get("id") == message_id), None
+            )
+            if target is None or target.get("read_at"):
+                return False
+            target["read_at"] = _now()
+            self._append(path, target)
+            return True
 
     def resolve_for_audit(self, audit_id: str, *, by: str) -> int:
         """把某张单的**未处理**消息全部标为已处理，返回条数。
@@ -140,16 +158,36 @@ class Inbox:
             return 0
         resolved = 0
         for path in sorted(self.base_dir.glob(f"*{INBOX_SUFFIX}")):
-            for msg in self._read_file(path):
-                if msg.get("audit_id") != audit_id or msg.get("resolved_at"):
-                    continue
-                msg["resolved_at"] = _now()
-                msg["resolved_by"] = by
-                self._append(path, msg)
-                resolved += 1
+            with self._locked(path):
+                for msg in self._read_file(path):
+                    if msg.get("audit_id") != audit_id or msg.get("resolved_at"):
+                        continue
+                    msg["resolved_at"] = _now()
+                    msg["resolved_by"] = by
+                    self._append(path, msg)
+                    resolved += 1
         return resolved
 
     # ---- 读 ----
+
+    @contextlib.contextmanager
+    def _locked(self, path: Path):
+        """单文件互斥锁（跨进程）。
+
+        收件箱的操作是"读全量 → 改一条 → 追加一行"，没有锁就是 read-modify-write
+        竞态：两个审核员同时标已读，各自读到旧内容、各写一行，后写覆盖先写。
+        ``_append`` 的单行短写在 O_APPEND 下基本原子，但**读-改-写**不是。
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fh = path.with_name(path.name + ".lock").open("a+b")
+        try:
+            _lock_file(fh)
+            try:
+                yield
+            finally:
+                _unlock_file(fh)
+        finally:
+            fh.close()
 
     def _append(self, path: Path, record: dict[str, Any]) -> None:
         """追加一行（新建消息或状态更新）。同 id 后写覆盖先写，读时合并。"""

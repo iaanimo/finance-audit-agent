@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from agent.inbox import Inbox
@@ -69,3 +71,24 @@ def test_resolve_records_who_and_is_idempotent(inbox):
 def test_unknown_kind_is_rejected(inbox):
     with pytest.raises(ValueError):
         inbox.send(to="审核台", kind="pay_now", audit_id="a1", subject="s", body="b")
+
+
+def test_concurrent_mark_read_does_not_lose_updates(inbox):
+    """收件箱是"读全量 → 改一条 → 追加"，没有锁就是 read-modify-write 竞态。
+
+    八个线程同时标已读（每人一条不同消息）：有锁则全部生效；
+    没锁时后写的快照会覆盖先写的，最终仍有未读 —— 这条测试就是抓它。
+    """
+    msgs = [
+        inbox.send(
+            to="审核台", kind="review_required", audit_id=f"a{i}",
+            subject="s", body="b", dedupe_key=f"a{i}:review_required",
+        )
+        for i in range(8)
+    ]
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda m: inbox.mark_read("审核台", m["id"]), msgs))
+
+    assert all(results)
+    assert inbox.count_unread("审核台") == 0

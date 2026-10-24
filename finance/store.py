@@ -385,9 +385,13 @@ def _lock_file(fh) -> None:
 
     锁 1 个字节的区域就够 —— 这里要的是"同一时刻只有一个决策在进行"，
     不是锁内容。等锁上限 5 秒，超时抛出，不无限挂着。
+
+    ⚠️ **不能用 ``read(1)`` 判断文件是否为空**：字节区锁一旦被别的句柄持有，
+    读同一个区域会直接 PermissionError（Windows 实测，收件箱并发测试抓到的）。
+    改用 ``seek(0, 2) + tell()`` 求大小 —— 不读任何字节。
     """
-    fh.seek(0)
-    if not fh.read(1):
+    fh.seek(0, 2)
+    if fh.tell() == 0:
         fh.write(b"\0")
         fh.flush()
     fh.seek(0)
