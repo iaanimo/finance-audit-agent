@@ -230,6 +230,19 @@
   .ev { font-weight: 700; }
   .spinner { display: inline-block; animation: spin 1s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* 「谁做了什么」：三类触发者一眼分开 */
+  .who-row { display: flex; gap: 10px; padding: 6px 0; border-bottom: 1px dashed #eceff3; align-items: baseline; }
+  .who-row:last-child { border-bottom: none; }
+  .who-row .t { width: 132px; color: var(--muted); font-size: 11px; flex: none; }
+  .who-row .d { flex: 1; min-width: 0; }
+  .who-badge {
+    flex: none; font-size: 11px; font-weight: 600; padding: 0 6px;
+    border-radius: 3px; font-family: ui-monospace, Consolas, monospace;
+  }
+  .who-system { background: #eef1f5; color: #4b5563; }
+  .who-agent { background: #e8eefc; color: var(--brand); }
+  .who-human { background: var(--pass-bg); color: var(--pass); }
+
   .toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: #1a1d23; color: #fff; padding: 9px 18px; border-radius: 5px;
@@ -930,6 +943,10 @@ function renderResult(r) {
   html += '<div class="card" style="margin-top:14px"><h2>⑦ 审计轨迹（只追加，不可修改）</h2>' +
     '<div class="body" id="logBox"><div class="hint">加载中…</div></div></div>';
 
+  /* 谁做了什么（人话版轨迹） */
+  html += '<div class="card" style="margin-top:14px"><h2>⑧ 谁做了什么</h2>' +
+    '<div class="body" id="whoBox"><div class="hint">加载中…</div></div></div>';
+
   el('resultCol').innerHTML = html;
 
   if (!decided) {
@@ -937,6 +954,7 @@ function renderResult(r) {
     el('rejectBtn').addEventListener('click', function () { askDecide('REJECTED'); });
   }
   loadLog(r.audit_id);
+  loadWho(r.audit_id);
 }
 
 function kv(k, v) {
@@ -1036,6 +1054,54 @@ function loadLog(auditId) {
     })
     .catch(function () {
       var box = el('logBox'); if (box) box.innerHTML = '<div class="hint">轨迹读取失败</div>';
+    });
+}
+
+/* ---------------- 谁做了什么（人话版轨迹） ----------------
+ * 原始 JSON 轨迹是证据，不是读物。这一段把同一批事件翻成三类触发者：
+ * system = 管线自己跑的；agent = 代理分派动作；human = 人做的。
+ * 映射是**确定性**的（事件名 → 中文），不经过模型。
+ */
+var STAGE_LABELS = {
+  validated: '静态校验', duplicate_checked: '查重', budget_checked: '预算',
+  draft_created: '生成凭证草稿'
+};
+
+function whoLabel(e) {
+  var name = e.event || '';
+  if (name === 'stage') return STAGE_LABELS[e.stage] || ('阶段：' + e.stage);
+  if (name === 'extracted') return '抽取发票（' + (e.method || 'pdf_text') + '）';
+  if (name === 'submitted') return '提交待审（建议 ' + (e.suggested_status || '—') + '）';
+  if (name === 'decided') return '人工决定：' + (e.decision || '—');
+  if (name === 'prefill_confirmed') return '人工确认票面字段';
+  if (name === 'agent.run.started') return 'agent 受理';
+  if (name === 'agent.run.finished') return e.recovered ? 'agent 补动作' : 'agent 完成分派';
+  if (name === 'agent.action') return 'agent 通知（' + (e.kind || e.action || '') + '）';
+  if (name === 'agent.gate.denied') return 'agent 越权被拒（' + (e.action || '') + '）';
+  if (name === 'inbox.resolved') return '关闭待办 ' + (e.count || 0) + ' 条';
+  return name || '—';
+}
+
+function loadWho(auditId) {
+  fetch('/api/agent/' + encodeURIComponent(auditId) + '/timeline')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (d) {
+      var box = el('whoBox'); if (!box) return;
+      var rows = (d && d.timeline) || [];
+      if (!rows.length) { box.innerHTML = '<div class="hint">暂无记录</div>'; return; }
+      var html = '<div class="hint" style="margin-bottom:6px">' +
+        'system = 管线自己跑的　agent = 代理分派　human = 人做的</div>';
+      rows.forEach(function (e) {
+        var kind = e.actor_type || 'system';
+        html += '<div class="who-row">' +
+          '<span class="t">' + esc(String(e.ts || '').replace('T', ' ').slice(0, 19)) + '</span>' +
+          '<span class="who-badge who-' + esc(kind) + '">' + esc(kind) + '</span>' +
+          '<span class="d">' + esc(whoLabel(e)) + '</span></div>';
+      });
+      box.innerHTML = html;
+    })
+    .catch(function () {
+      var box = el('whoBox'); if (box) box.innerHTML = '<div class="hint">轨迹加载失败</div>';
     });
 }
 
