@@ -94,6 +94,16 @@ API_DESCRIPTION = """
 - 错误用 HTTP 状态码 + `{"detail": "..."}`，不套统一 envelope。
 - 事件源按「文档内容 + 申请单内容」哈希去重：同一份材料重复投放不会生成第二张单。
 
+## 错误码
+
+| 状态码 | 含义 | 典型 detail |
+|---|---|---|
+| 400 | 入参不合法：DTO、必填项、关键字段未声明、推翻未写理由 | `报销申请单字段有误：…` |
+| 403 | 「清空演示数据」未在 --demo 下开启 | `「清空演示数据」已停用…` |
+| 404 | 审核单或消息不存在 | `审核单不存在。` |
+| 409 | 冲突，**两种含义**：该单已被决定 / 扫描正在进行 | `已由 李会计 做过决定`、`正在被另一轮扫描处理` |
+| 422 | 发票处理失败（抽取失败、文件损坏） | `发票处理失败：…` |
+
 ## Agent 是怎么被唤醒的
 
 当前只有**目录轮询**这一条事件源：把「发票 + 申请单」成对放进 `data/inbound/`，
@@ -137,6 +147,173 @@ DEMO_MODE = False
 _MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 
 _ALLOWED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".xml", ".ofd"}
+
+
+# ---------------------------------------------------------------------------
+# 接口文档示例（P1）：响应体按**真实跑出来的结构**写，不手编字段
+# ---------------------------------------------------------------------------
+# 为什么值得写：对接方看 schema 只知道类型，不知道"长什么样"。
+# 示例从一次真实 S01 运行里截取（findings 取前两条），字段名与顺序都是真的。
+
+_EX_RUN_OK = {
+    "audit_id": "54a58dabd7d6",
+    "state": "pending_review",
+    "suggested_status": "APPROVED",
+    "narrative": "共执行 19 条规则：通过 14 条，不适用 5 条（票种/费用类型不涉及）……",
+    "narrative_source": "template",
+    "findings": [
+        {
+            "rule_id": "R001",
+            "clause": "3.1",
+            "title": "发票抬头必须为公司全称",
+            "clause_text": "发票「购买方名称」必须为 示例科技有限公司 全称。……",
+            "severity": "PASS",
+            "message": "抬头为「示例科技有限公司」，与公司全称一致",
+            "evidence": {
+                "field": "购买方名称",
+                "actual": "示例科技有限公司",
+                "expected": "示例科技有限公司",
+            },
+            "applicable": True,
+            "error": None,
+        },
+        {
+            "rule_id": "R006",
+            "clause": "4.3",
+            "title": "餐饮费人均不超过 150 元",
+            "severity": "FAIL",
+            "message": "人均 175.00 元（700.00 / 4 人），超过人均限额 150.00 元",
+            "evidence": {"per_head": "175.00", "limit": "150.00"},
+            "applicable": True,
+        },
+    ],
+    "voucher": {
+        "lines": [
+            {"direction": "借", "account": "管理费用-差旅费-住宿费", "amount": 1650.0},
+            {"direction": "贷", "account": "其他应付款-员工报销", "amount": 1650.0},
+        ],
+        "summary": "张三 住宿费报销 上海客户现场支持",
+        "debit_total": 1650.0,
+        "credit_total": 1650.0,
+        "balanced": True,
+    },
+    "decision": None,
+    "overridden": False,
+}
+
+_EX_TIMELINE = {
+    "audit_id": "54a58dabd7d6",
+    "timeline": [
+        {"seq": 1, "event": "extracted", "actor_type": "system",
+         "ts": "2026-10-24T13:40:00+00:00"},
+        {"seq": 7, "event": "agent.run.started", "actor": "nono-agent",
+         "actor_type": "agent", "ts": "2026-10-24T13:40:00+00:00"},
+        {"seq": 8, "event": "agent.action", "action": "notify_reviewer",
+         "kind": "draft_ready", "result": "sent", "actor_type": "agent",
+         "ts": "2026-10-24T13:40:00+00:00"},
+        {"seq": 10, "event": "decided", "decision": "APPROVED",
+         "operator": "李会计", "actor_type": "human",
+         "ts": "2026-10-24T13:41:12+00:00"},
+    ],
+}
+
+_RUN_RESPONSES = {
+    200: {
+        "description": "审核完成：停在「待签批」，等待人工决定（系统不会自己批准）",
+        "content": {"application/json": {"example": _EX_RUN_OK}},
+    },
+    400: {
+        "description": "报销申请单字段有误 / 关键字段修改未声明",
+        "content": {"application/json": {"example": {"detail": "报销申请单字段有误：申请人未填"}}},
+    },
+    422: {
+        "description": "发票处理失败（抽取失败、文件损坏、不支持的类型）",
+        "content": {"application/json": {"example": {"detail": "发票处理失败：无法读取 PDF 文本层"}}},
+    },
+}
+
+_DECIDE_RESPONSES = {
+    200: {
+        "description": "决定已落盘（轨迹只追加；推翻系统建议时 override_reason 随单留档）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "audit_id": "54a58dabd7d6",
+                    "state": "approved",
+                    "decision": "APPROVED",
+                    "operator": "李会计",
+                    "override_reason": "",
+                    "overridden": False,
+                    "decided_at": "2026-10-24T13:41:12+00:00",
+                    "suggested_status": "APPROVED",
+                }
+            }
+        },
+    },
+    400: {
+        "description": "推翻系统建议但未写书面理由（制度 2.3 的服务端强制）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": "系统建议为 REJECTED，你的决定是 APPROVED，"
+                    "属于推翻系统建议，必须填写书面理由"
+                }
+            }
+        },
+    },
+    409: {
+        "description": "该单已被做过决定（重复点击 / 并发）",
+        "content": {
+            "application/json": {
+                "example": {"detail": "审核单 54a58dabd7d6 已由 李会计 做过决定"}
+            }
+        },
+    },
+}
+
+_TIMELINE_RESPONSES = {
+    200: {
+        "description": "按 seq 排序的轨迹；actor_type 区分 system / agent / human",
+        "content": {"application/json": {"example": _EX_TIMELINE}},
+    },
+    404: {
+        "description": "审核单不存在",
+        "content": {"application/json": {"example": {"detail": "审核单不存在。"}}},
+    },
+}
+
+_SCAN_RESPONSES = {
+    200: {
+        "description": "本轮**真正新受理**的单据（幂等跳过与失败的不计入）",
+        "content": {
+            "application/json": {
+                "example": {
+                    "handled": [
+                        {
+                            "audit_id": "54a58dabd7d6",
+                            "state": "pending_review",
+                            "suggested_status": "APPROVED",
+                            "actions": ["notify_reviewer"],
+                            "steps": [
+                                {"action": "notify_reviewer", "outcome": "sent", "to": "审核台"}
+                            ],
+                            "recovered": False,
+                        }
+                    ],
+                    "inbound": "D:\\nono\\data\\inbound",
+                }
+            }
+        },
+    },
+    409: {
+        "description": "另一轮扫描正在进行（不排队，稍后重试）",
+        "content": {
+            "application/json": {
+                "example": {"detail": "data/inbound 正在被另一轮扫描处理，稍后重试"}
+            }
+        },
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +474,12 @@ async def audit_list():
     return {"audits": AUDIT_STORE.list_audits()}
 
 
-@app.post("/api/audit/run", tags=["核心审核"], summary="提交单据审核")
+@app.post(
+    "/api/audit/run",
+    tags=["核心审核"],
+    summary="提交单据审核",
+    responses=_RUN_RESPONSES,
+)
 async def audit_run(req: AuditRunRequest):
     """提交一张发票跑审核。
 
@@ -514,7 +696,12 @@ async def audit_log(audit_id: str):
     }
 
 
-@app.post("/api/audit/{audit_id}/decide", tags=["核心审核"], summary="人工复核决定")
+@app.post(
+    "/api/audit/{audit_id}/decide",
+    tags=["核心审核"],
+    summary="人工复核决定",
+    responses=_DECIDE_RESPONSES,
+)
 async def audit_decide(audit_id: str, req: AuditDecideRequest):
     """人工决定。**全系统唯一能批准报销的入口。**
 
@@ -632,7 +819,12 @@ async def agent_actions():
     return {"actions": [gate.explain(action) for action in Action]}
 
 
-@app.get("/api/agent/{audit_id}/timeline", tags=["Agent 编排"], summary="审核轨迹时间线")
+@app.get(
+    "/api/agent/{audit_id}/timeline",
+    tags=["Agent 编排"],
+    summary="审核轨迹时间线",
+    responses=_TIMELINE_RESPONSES,
+)
 async def agent_timeline(audit_id: str):
     """把审计轨迹翻成"谁做了什么"：system / agent / human 三类触发者。"""
     _load_or_404(audit_id)
@@ -681,7 +873,12 @@ async def agent_remind():
     return {"reminded": _agent_runtime().remind_stale()}
 
 
-@app.post("/api/agent/scan", tags=["Agent 编排"], summary="扫描收件口（事件源）")
+@app.post(
+    "/api/agent/scan",
+    tags=["Agent 编排"],
+    summary="扫描收件口（事件源）",
+    responses=_SCAN_RESPONSES,
+)
 async def agent_scan():
     """扫一轮 ``data/inbound/``（事件源）：成对的文档 + 申请单会被自动受理。
 

@@ -49,6 +49,28 @@ def test_description_states_real_boundaries():
     assert "decide" in desc and "唯一" in desc
     assert "不是可信时间戳" in desc
     assert "没有后台调度器" in desc
+    assert "错误码" in desc and "409" in desc
+
+
+def test_key_endpoints_carry_response_examples():
+    """对接方看 schema 只知道类型，看不到长什么样 —— 关键接口必须有示例。"""
+    paths = _schema()["paths"]
+    for path, method in (
+        ("/api/audit/run", "post"),
+        ("/api/audit/{audit_id}/decide", "post"),
+        ("/api/agent/{audit_id}/timeline", "get"),
+        ("/api/agent/scan", "post"),
+    ):
+        responses = paths[path][method]["responses"]
+        assert "200" in responses, f"{path} 缺 200 响应说明"
+        example = responses["200"].get("content", {}).get("application/json", {}).get("example")
+        assert example, f"{path} 缺 200 响应示例"
+
+
+def test_409_has_two_known_meanings():
+    """409 在本项目有两种含义（已决定 / 扫描中），文档必须分开写。"""
+    desc = _schema()["info"]["description"]
+    assert "已被决定" in desc and "扫描正在进行" in desc
 
 
 def test_request_examples_are_provided():
