@@ -13,14 +13,19 @@
     --brand: #1f4fd8;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
     font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
     font-size: 13px; line-height: 1.6;
+    /* 两栏各自滚动：页面本身不再滚，滚动交给左右两栏 */
+    display: flex; flex-direction: column; overflow: hidden;
   }
   header {
     background: #fff; border-bottom: 1px solid var(--line); padding: 14px 22px;
-    display: flex; align-items: center; gap: 14px; position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 14px;
+    position: sticky; top: 0; z-index: 20;
+    flex: 0 0 auto;
   }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .5px; }
   header .tag {
@@ -34,8 +39,28 @@
   }
   header a:hover, header button.linkbtn:hover { color: var(--ink); }
 
-  .wrap { display: grid; grid-template-columns: 360px 1fr; gap: 18px; padding: 18px 22px 60px; align-items: start; }
-  @media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+  /* 左右两栏各自滚动。三个要点，缺一个滚动就会"漏"到页面上：
+     1) body 是 flex 列容器且 overflow:hidden，.wrap 才拿得到剩余高度；
+     2) .wrap 必须有 min-height:0 —— flex 子项默认 min-height:auto 会把容器撑破；
+     3) 两栏 height:100% + overflow-y:auto，滚动条各归各的。 */
+  .wrap {
+    flex: 1 1 auto; min-height: 0; overflow: hidden;
+    display: grid; grid-template-columns: 360px 1fr; gap: 18px;
+    padding: 18px 22px;
+    align-items: stretch;
+  }
+  .wrap > div {
+    min-width: 0; min-height: 0;
+    height: 100%; overflow-y: auto; overscroll-behavior: contain;
+    padding-bottom: 18px;          /* 最后一张卡片不贴底 */
+  }
+  @media (max-width: 1000px) {
+    /* 窄屏回到整页滚动：两栏并排时各自滚动没有意义 */
+    html, body { height: auto; }
+    body { display: block; overflow: visible; }
+    .wrap { display: block; overflow: visible; padding: 18px 22px 60px; }
+    .wrap > div { height: auto; overflow: visible; padding-bottom: 0; }
+  }
 
   .card { background: #fff; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .card > h2 {
@@ -743,6 +768,7 @@ el('runBtn').addEventListener('click', function () {
   }).then(function (result) {
     currentAudit = result;
     renderResult(result);
+    scrollResultTop();
     loadAuditList();
     toast('审核完成：' + result.suggested_status);
   }).catch(function (e) {
@@ -957,6 +983,7 @@ function submitDecide(decision, operator, reason) {
   }).then(function (result) {
     currentAudit = result;
     renderResult(result);
+    scrollResultTop();
     loadAuditList();
     toast(result.overridden ? '已批准（推翻系统建议，理由已留档）' : '已完成');
   }).catch(function (e) { toast('✕ ' + e.message); });
@@ -1016,9 +1043,16 @@ function loadAuditList() {
   });
 }
 
+/* 右栏是独立滚动容器，页面滚动不再管用 —— 换单后把右栏拉回顶部，
+   否则点开另一张单会停在上一张的滚动位置上（看起来像没反应）。 */
+function scrollResultTop() {
+  var col = el('resultCol');
+  if (col) col.scrollTop = 0;
+}
+
 function openAudit(id) {
   fetch('/api/audit/' + encodeURIComponent(id)).then(function (r) { return r.json(); })
-    .then(function (d) { currentAudit = d; renderResult(d); window.scrollTo(0, 0); });
+    .then(function (d) { currentAudit = d; renderResult(d); scrollResultTop(); });
 }
 
 /* ---------------- 重置 ---------------- */
