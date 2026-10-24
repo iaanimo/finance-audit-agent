@@ -338,6 +338,16 @@ class AgentRuntime:
                     subject=f"【待复核·驳回项】{result.request.applicant} "
                     f"{result.request.expense_type} 单",
                     body=_blocking_body(result),
+                    # 疑点不阻断，但复核时得看见 —— 否则"超期 + 缺清单"这类单，
+                    # 人只看得到驳回项，回头还得再问一次。
+                    extra={
+                        "warnings": [
+                            {"rule_id": f.rule_id, "message": f.message}
+                            for f in warnings
+                        ]
+                    }
+                    if warnings
+                    else None,
                 )
             ]
 
@@ -381,6 +391,7 @@ class AgentRuntime:
         dedupe_key: str,
         subject: str,
         body: str,
+        extra: dict[str, Any] | None = None,
     ) -> Step:
         """执行一个 L1 动作：过闸门 → 投递（幂等）→ 落审计日志。
 
@@ -404,6 +415,7 @@ class AgentRuntime:
             subject=subject,
             body=body,
             dedupe_key=dedupe_key,
+            extra=extra,
         )
         outcome = "deduped" if already else "sent"
         self.store.append_log(
@@ -496,6 +508,12 @@ def _blocking_body(result: AuditResult) -> str:
     ]
     for f in result.blocking_findings:
         lines.append(f"  - [{f.rule_id}] 制度{f.clause} {f.title}：{f.message}")
+    # 疑点单独列一段：它们不阻断，但"超期 + 缺清单"这种单，复核的人必须知道
+    # 还差什么材料 —— 否则驳回之后还得再问一轮。
+    if result.warning_findings:
+        lines.append("另有疑点（不阻断，复核时需一并看）：")
+        for f in result.warning_findings:
+            lines.append(f"  - [{f.rule_id}] 制度{f.clause} {f.title}：{f.message}")
     lines.append("请人工复核后做出决定；系统不会自行批准或驳回。")
     return "\n".join(lines)
 

@@ -282,6 +282,39 @@ def test_recover_leaves_midway_states_to_humans(runtime, store):
     assert runtime.recover() == []
 
 
+def test_blocking_notification_carries_warnings(runtime, store):
+    """FAIL 与 WARN 并存时，疑点必须一起送到复核人手里。
+
+    否则"超期（FAIL）+ 缺清单（WARN）"这种单，人只看得到驳回项，
+    回头还得再问一轮。样本集里没有现成的 FAIL+WARN 组合，
+    这里用"餐饮缺人数 + 提交日期拖到 90 天后"造一个。
+    """
+    report = _submit(
+        runtime,
+        "S08_meal_no_headcount.pdf",
+        expense_type="餐饮费",
+        amount="600.00",
+        nights=None,
+        headcount=None,
+        reason="客户工作餐",
+        submit_date=date(2026, 12, 20),
+    )
+    saved = store.load(report.audit_id)
+    assert saved.blocking_findings, "这张单应命中驳回项"
+    assert saved.warning_findings, "这张单应同时命中疑点"
+
+    messages = [
+        m for m in runtime.inbox.messages_for(REVIEW_DESK) if m["audit_id"] == report.audit_id
+    ]
+    assert len(messages) == 1
+    msg = messages[0]
+    assert msg["kind"] == "review_required"
+    assert "另有疑点" in msg["body"]
+    assert msg["extra"]["warnings"], "结构化 warnings 必须随消息带出"
+    # FAIL 单不额外发补料：反正要驳回，这时追着申请人要材料是骚扰
+    assert runtime.inbox.messages_for("张三") == []
+
+
 # --------------------------------------------------------------------------
 # 6. 催办：调用时判断，不是定时任务
 # --------------------------------------------------------------------------
