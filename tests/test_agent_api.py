@@ -143,6 +143,29 @@ def test_no_endpoint_can_approve_on_behalf_of_human(client):
             assert method in {"get", "post"}, f"{path} 用了 {method}"
 
 
+def test_decision_closes_the_inbox_item(client, temp_data_dir):
+    """人做完决定，该单的待办必须关闭 —— 而且关闭它的是人，不是 agent。"""
+    _drop(temp_data_dir / "inbound")
+    audit_id = _scan(client)[0]["audit_id"]
+    assert client.get("/api/agent/inbox").json()["open"] == 1
+
+    resp = client.post(
+        f"/api/audit/{audit_id}/decide",
+        json={"decision": "APPROVED", "operator": "李会计"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    inbox = client.get("/api/agent/inbox").json()
+    assert inbox["open"] == 0
+    assert inbox["unread"] == 1  # 没打开过，但已经办完了
+    assert inbox["messages"][0]["resolved_by"] == "李会计"
+
+    timeline = client.get(f"/api/agent/{audit_id}/timeline").json()["timeline"]
+    row = next(r for r in timeline if r["event"] == "inbox.resolved")
+    assert row["actor_type"] == "human"
+    assert row["actor"] == "李会计"
+
+
 def test_scan_returns_409_while_another_scan_runs(client, temp_data_dir):
     inbound = temp_data_dir / "inbound"
     inbound.mkdir(parents=True, exist_ok=True)

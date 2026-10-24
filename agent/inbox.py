@@ -110,30 +110,54 @@ class Inbox:
             "body": body,
             "dedupe_key": dedupe_key,
             "read_at": None,
+            # 已读 ≠ 已处理：打开消息是"看"，做出决定才是"办完"。
+            "resolved_at": None,
+            "resolved_by": "",
         }
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        with self._path(to).open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._append(self._path(to), record)
         return record
 
     def mark_read(self, who: str, message_id: str) -> bool:
         """把某条消息标为已读。**追加一条状态行**，不原地改文件 ——
         与审计日志同一原则：轨迹不覆盖，只追加。"""
-        msg = self._read_all(who)
-        target = next((m for m in msg if m.get("id") == message_id), None)
+        target = next((m for m in self._read_all(who) if m.get("id") == message_id), None)
         if target is None or target.get("read_at"):
             return False
         target["read_at"] = _now()
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        with self._path(who).open("a", encoding="utf-8") as fh:
-            # 用同 id 追加一条"已读"更新行；read_all 合并时后写覆盖先写
-            fh.write(json.dumps(target, ensure_ascii=False) + "\n")
+        self._append(self._path(who), target)
         return True
+
+    def resolve_for_audit(self, audit_id: str, *, by: str) -> int:
+        """把某张单的**未处理**消息全部标为已处理，返回条数。
+
+        与"已读"分两件事：打开消息是看，做出决定才是办完。人批完单之后消息
+        如果还挂在待办里，待办数就永远失真 —— 系统会欠下一堆"看起来没人管"
+        的通知，其实早就处理完了。
+
+        跨收件人：审核台的通知、申请人的补料请求都属于这张单，一并关闭。
+        """
+        if not self.base_dir.is_dir():
+            return 0
+        resolved = 0
+        for path in sorted(self.base_dir.glob(f"*{INBOX_SUFFIX}")):
+            for msg in self._read_file(path):
+                if msg.get("audit_id") != audit_id or msg.get("resolved_at"):
+                    continue
+                msg["resolved_at"] = _now()
+                msg["resolved_by"] = by
+                self._append(path, msg)
+                resolved += 1
+        return resolved
 
     # ---- 读 ----
 
-    def _read_all(self, who: str) -> list[dict[str, Any]]:
-        path = self._path(who)
+    def _append(self, path: Path, record: dict[str, Any]) -> None:
+        """追加一行（新建消息或状态更新）。同 id 后写覆盖先写，读时合并。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _read_file(self, path: Path) -> list[dict[str, Any]]:
         if not path.is_file():
             return []
         out: list[dict[str, Any]] = []
@@ -145,11 +169,14 @@ class Inbox:
                 out.append(json.loads(line))
             except json.JSONDecodeError:
                 continue  # 坏行跳过：收件箱残缺好过整个读不出来
-        # 同一 id 的后写覆盖先写（mark_read 靠这个生效）
+        # 同一 id 的后写覆盖先写（mark_read / resolve_for_audit 靠这个生效）
         merged: dict[str, dict[str, Any]] = {}
         for msg in out:
             merged[msg.get("id", "")] = msg
         return list(merged.values())
+
+    def _read_all(self, who: str) -> list[dict[str, Any]]:
+        return self._read_file(self._path(who))
 
     def find(
         self, *, to: str, audit_id: str, kind: str, dedupe_key: str = ""
@@ -164,13 +191,21 @@ class Inbox:
                 return msg
         return None
 
-    def messages_for(self, who: str, unread_only: bool = False) -> list[dict[str, Any]]:
-        """某人收件箱，按时间倒序。"""
+    def messages_for(
+        self, who: str, unread_only: bool = False, open_only: bool = False
+    ) -> list[dict[str, Any]]:
+        """某人收件箱，按时间倒序。``open_only`` 只留未处理的（待办口径）。"""
         msgs = self._read_all(who)
         if unread_only:
             msgs = [m for m in msgs if not m.get("read_at")]
+        if open_only:
+            msgs = [m for m in msgs if not m.get("resolved_at")]
         msgs.sort(key=lambda m: str(m.get("ts", "")), reverse=True)
         return msgs
 
     def count_unread(self, who: str) -> int:
         return len(self.messages_for(who, unread_only=True))
+
+    def count_open(self, who: str) -> int:
+        """未处理条数 —— 这才是"待办"该看的数字。"""
+        return len(self.messages_for(who, open_only=True))

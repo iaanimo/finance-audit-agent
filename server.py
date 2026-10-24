@@ -466,6 +466,9 @@ async def audit_decide(audit_id: str, req: AuditDecideRequest):
     except AuditError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
+    # 决定已落盘 → 该单的待办消息一并关闭（由人的决定关闭，不是 agent）
+    _agent_runtime().settle(audit_id, by=req.operator.strip())
+
     return result.to_json_dict()
 
 
@@ -560,13 +563,22 @@ async def agent_timeline(audit_id: str):
 
 
 @app.get("/api/agent/inbox")
-async def agent_inbox(who: str = REVIEW_DESK, unread_only: bool = False):
-    """站内收件箱（默认审核台）。不接真邮件/企微 —— 能力先关在系统里。"""
+async def agent_inbox(
+    who: str = REVIEW_DESK, unread_only: bool = False, open_only: bool = False
+):
+    """站内收件箱（默认审核台）。不接真邮件/企微 —— 能力先关在系统里。
+
+    ``unread`` 是没打开过的，``open`` 是还没处理的（做完决定就清零）——
+    待办看 ``open``，不要拿 ``unread`` 当待办数。
+    """
     runtime = _agent_runtime()
     return {
         "who": who,
         "unread": runtime.inbox.count_unread(who),
-        "messages": runtime.inbox.messages_for(who, unread_only=unread_only),
+        "open": runtime.inbox.count_open(who),
+        "messages": runtime.inbox.messages_for(
+            who, unread_only=unread_only, open_only=open_only
+        ),
     }
 
 

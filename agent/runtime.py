@@ -43,7 +43,7 @@ from finance.models import AuditResult, AuditState, ReimbursementRequest
 from finance.policy import PolicyBundle
 from finance.store import AuditStore
 
-from .actors import Actor, agent_actor
+from .actors import Actor, agent_actor, human
 from .gate import Action, Gate, OutOfBoundsAction, spec
 from .inbox import Inbox
 
@@ -207,6 +207,30 @@ class AgentRuntime:
             )
         return reports
 
+    def settle(self, audit_id: str, *, by: str, role: str = "") -> int:
+        """人做出决定后，关闭这张单的待办消息。
+
+        放在 runtime 而不是 inbox：一次动作要写两处（收件箱状态 + 审计日志），
+        跨两处的事归编排层管。actor 记成**人** —— 是人的决定关掉了通知，
+        agent 只是把这件事记下来。
+
+        :return: 关闭的消息条数（0 = 本来就没有待办，不是错误）
+        """
+        by = str(by).strip()
+        if not by:
+            return 0
+        count = self.inbox.resolve_for_audit(audit_id, by=by)
+        if count:
+            self.store.append_log(
+                audit_id,
+                {
+                    "event": "inbox.resolved",
+                    "count": count,
+                    **human(by, role=role).log_fields(),
+                },
+            )
+        return count
+
     def timeline(self, audit_id: str) -> list[dict[str, Any]]:
         """把轨迹转成"谁做了什么"的时间线，供 UI 与排查用。
 
@@ -217,8 +241,12 @@ class AgentRuntime:
         out: list[dict[str, Any]] = []
         for event in self.store.read_log(audit_id):
             name = str(event.get("event", ""))
-            if name.startswith("agent."):
-                kind = str(event.get("actor_type") or "agent")
+            # 事件自己带了 actor_type 就信它（例如人触发的 inbox.resolved）；
+            # 没带才按事件名推断 —— 推断只是兜底，不该覆盖事实。
+            if event.get("actor_type"):
+                kind = str(event["actor_type"])
+            elif name.startswith("agent."):
+                kind = "agent"
             elif name in ("decided", "prefill_confirmed"):
                 kind = "human"
             else:
