@@ -36,7 +36,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent import Action, Gate, Inbox
 from agent.events import DirectorySource, ScanInProgress
@@ -73,7 +73,45 @@ def setup_logging() -> None:
         ],
     )
 
-app = FastAPI(title="财务报销审核受控 Agent", docs_url="/docs")
+API_DESCRIPTION = """
+财务报销审核受控 Agent —— 接口文档。
+
+## 这个接口能做什么、不能做什么
+
+- **判定零 LLM**：19 条规则由 Python 逐条算出，结论可复现；每个响应都带 `rule_version`，供 ERP 事后按版本复算。
+- `/api/audit/{audit_id}/decide` 是**唯一**能批准报销的入口，必须由人调用并填写操作人。
+- Agent 层只能把单据推进到「待签批」：它可以通知、要材料、补发消息，**不能**批准、付款、归档。
+- 审计日志是只追加的哈希链：**改了能被发现**（见 `GET /api/audit/{id}/log`），但它不是可信时间戳，也不是法律级电子签名。
+
+## 鉴权
+
+**当前版本没有鉴权**（单机本地运行，默认只监听 127.0.0.1）。
+请勿直接暴露公网；生产接入需补 API Key / SSO —— 接口已留，尚未实现。
+
+## 接入约定
+
+- 金额一律用字符串传输（如 `"1650.00"`），避免二进制浮点误差。
+- 错误用 HTTP 状态码 + `{"detail": "..."}`，不套统一 envelope。
+- 事件源按「文档内容 + 申请单内容」哈希去重：同一份材料重复投放不会生成第二张单。
+
+## Agent 是怎么被唤醒的
+
+当前只有**目录轮询**这一条事件源：把「发票 + 申请单」成对放进 `data/inbound/`，
+调用 `POST /api/agent/scan` 扫一轮。**没有后台调度器**，也没有 webhook ——
+定时催办（`REMIND`）尚未实现，因此本版本不会自己"醒来"。
+"""
+
+app = FastAPI(
+    title="财务报销审核受控 Agent",
+    description=API_DESCRIPTION,
+    docs_url="/docs",
+    openapi_tags=[
+        {"name": "核心审核", "description": "提交、查看、人工决定。判定零 LLM，结论可复现。"},
+        {"name": "Agent 编排", "description": "事件源扫描、断点恢复、时间线、收件箱。Agent 只能推进到待签批，不能签字。"},
+        {"name": "ERP 集成", "description": "无状态审核接口：DTO 进、结论出，不落本地 store。供 ERP 联调。"},
+        {"name": "系统", "description": "健康检查与演示数据维护。清空仅在 --demo 下可用。"},
+    ],
+)
 
 # ERP 无状态审核接口（G3-4b 集成壳）：POST /audit + GET /version
 # ——DTO 进结论出、不落 store、零 LLM，契约见 finance/erp_api.py
@@ -126,6 +164,25 @@ class AuditRunRequest(BaseModel):
     )
     confirmed_by: str = Field(default="", description="确认人（留痕）")
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "filename": "S01_hotel_ok.pdf",
+                "content_b64": "JVBERi0xLjQK（PDF 文件的 base64，此处省略）",
+                "request": {
+                    "applicant": "张三",
+                    "department": "技术部",
+                    "expense_type": "住宿费",
+                    "amount": "1650.00",
+                    "reason": "上海客户现场支持",
+                    "submit_date": "2026-09-18",
+                    "city": "上海",
+                    "nights": 3,
+                },
+            }
+        }
+    )
+
 
 class AuditDecideRequest(BaseModel):
     decision: str = Field(description="APPROVED 或 REJECTED")
@@ -134,19 +191,29 @@ class AuditDecideRequest(BaseModel):
         default="", description="推翻系统建议时的书面理由（制度 2.3 要求必填）"
     )
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "decision": "APPROVED",
+                "operator": "李会计",
+                "override_reason": "客户临时改期，超标部分员工自付，已电话确认",
+            }
+        }
+    )
+
 
 # ---------------------------------------------------------------------------
 # 页面
 # ---------------------------------------------------------------------------
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def index():
     """根路径直接进审核台。"""
     return RedirectResponse(url="/audit")
 
 
-@app.get("/audit")
+@app.get("/audit", include_in_schema=False)
 async def audit_page():
     page = HERE / "static" / "audit.html"
     if not page.is_file():
@@ -154,7 +221,7 @@ async def audit_page():
     return FileResponse(page)
 
 
-@app.get("/api/health")
+@app.get("/api/health", include_in_schema=False, tags=["系统"], summary="健康检查（含演示模式标志）")
 async def health():
     """健康检查。顺带告诉页面当前是不是演示模式 —— 页面据此决定显不显示清空按钮。"""
     return {"status": "ok", "demo_mode": DEMO_MODE}
@@ -165,7 +232,7 @@ async def health():
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/audit/samples")
+@app.get("/api/audit/samples", tags=["核心审核"], summary="列出内置样本票")
 async def audit_samples():
     """列出内置合成样本票，供演示时一键选用。"""
     manifest_path = SAMPLE_DIR / "samples.yaml"
@@ -188,7 +255,7 @@ async def audit_samples():
     }
 
 
-@app.get("/api/audit/sample/{key}")
+@app.get("/api/audit/sample/{key}", tags=["核心审核"], summary="取一张样本票原文")
 async def audit_sample_file(key: str):
     """取一张样本票的原文（前端转 base64 后回传，模拟"上传"）。
 
@@ -224,12 +291,12 @@ async def audit_sample_file(key: str):
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/audit/list")
+@app.get("/api/audit/list", tags=["核心审核"], summary="审核单列表")
 async def audit_list():
     return {"audits": AUDIT_STORE.list_audits()}
 
 
-@app.post("/api/audit/run")
+@app.post("/api/audit/run", tags=["核心审核"], summary="提交单据审核")
 async def audit_run(req: AuditRunRequest):
     """提交一张发票跑审核。
 
@@ -327,8 +394,17 @@ class ExtractRequest(BaseModel):
     filename: str = Field(default="", description="原始文件名，用于后缀判断")
     content_b64: str = Field(default="", description="发票文件的 base64 内容")
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "filename": "S01_hotel_ok.pdf",
+                "content_b64": "JVBERi0xLjQK（PDF 文件的 base64，此处省略）",
+            }
+        }
+    )
 
-@app.post("/api/audit/extract")
+
+@app.post("/api/audit/extract", tags=["核心审核"], summary="票面预抽取（不建单）")
 async def audit_extract(req: ExtractRequest):
     """只抽取、不建单 —— 给「票面确认卡」做 AI 预填用。
 
@@ -408,7 +484,7 @@ async def audit_extract(req: ExtractRequest):
     }
 
 
-@app.get("/api/audit/{audit_id}")
+@app.get("/api/audit/{audit_id}", tags=["核心审核"], summary="审核单详情")
 async def audit_detail(audit_id: str):
     """单据详情。
 
@@ -423,7 +499,7 @@ async def audit_detail(audit_id: str):
     }
 
 
-@app.get("/api/audit/{audit_id}/log")
+@app.get("/api/audit/{audit_id}/log", tags=["核心审核"], summary="审计轨迹（哈希链）")
 async def audit_log(audit_id: str):
     """审计轨迹。只追加，不可修改 —— 页面上的"可追溯"指的就是这个。
 
@@ -437,7 +513,7 @@ async def audit_log(audit_id: str):
     }
 
 
-@app.post("/api/audit/{audit_id}/decide")
+@app.post("/api/audit/{audit_id}/decide", tags=["核心审核"], summary="人工复核决定")
 async def audit_decide(audit_id: str, req: AuditDecideRequest):
     """人工决定。**全系统唯一能批准报销的入口。**
 
@@ -472,7 +548,7 @@ async def audit_decide(audit_id: str, req: AuditDecideRequest):
     return result.to_json_dict()
 
 
-@app.post("/api/audit/reset")
+@app.post("/api/audit/reset", tags=["系统"], summary="清空运行数据（仅演示模式）")
 async def audit_reset():
     """清空演示数据 —— **仅演示模式可用**。
 
@@ -548,21 +624,21 @@ def _agent_runtime() -> AgentRuntime:
     )
 
 
-@app.get("/api/agent/actions")
+@app.get("/api/agent/actions", tags=["Agent 编排"], summary="动作分级表（L0–L3）")
 async def agent_actions():
     """L0–L3 动作表 —— 演示"为什么 agent 不能付款"时直接看这张表。"""
     gate = Gate()
     return {"actions": [gate.explain(action) for action in Action]}
 
 
-@app.get("/api/agent/{audit_id}/timeline")
+@app.get("/api/agent/{audit_id}/timeline", tags=["Agent 编排"], summary="审核轨迹时间线")
 async def agent_timeline(audit_id: str):
     """把审计轨迹翻成"谁做了什么"：system / agent / human 三类触发者。"""
     _load_or_404(audit_id)
     return {"audit_id": audit_id, "timeline": _agent_runtime().timeline(audit_id)}
 
 
-@app.get("/api/agent/inbox")
+@app.get("/api/agent/inbox", tags=["Agent 编排"], summary="审核台收件箱")
 async def agent_inbox(
     who: str = REVIEW_DESK, unread_only: bool = False, open_only: bool = False
 ):
@@ -582,20 +658,20 @@ async def agent_inbox(
     }
 
 
-@app.post("/api/agent/inbox/{message_id}/read")
+@app.post("/api/agent/inbox/{message_id}/read", tags=["Agent 编排"], summary="消息标为已读")
 async def agent_inbox_read(message_id: str, who: str = REVIEW_DESK):
     if not _agent_runtime().inbox.mark_read(who, message_id):
         raise HTTPException(status_code=404, detail="消息不存在或已读。")
     return {"ok": True}
 
 
-@app.post("/api/agent/recover")
+@app.post("/api/agent/recover", tags=["Agent 编排"], summary="断点恢复（不重跑判定）")
 async def agent_recover():
     """断点恢复：只补发漏掉的动作，**不重跑判定**。"""
     return {"recovered": [r.to_dict() for r in _agent_runtime().recover()]}
 
 
-@app.post("/api/agent/scan")
+@app.post("/api/agent/scan", tags=["Agent 编排"], summary="扫描收件口（事件源）")
 async def agent_scan():
     """扫一轮 ``data/inbound/``（事件源）：成对的文档 + 申请单会被自动受理。
 

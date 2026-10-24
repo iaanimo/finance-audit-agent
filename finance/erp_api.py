@@ -41,7 +41,7 @@ RULE_VERSION = "v1.0.0"
 CODE_REF = f"nono/finance/rules@{RULE_VERSION}"
 DTO_VERSION = "1"
 
-router = APIRouter(tags=["erp"])
+router = APIRouter(tags=["ERP 集成"])
 
 _SEVERITY_MAP: dict[Severity, str] = {
     Severity.PASS: "info",
@@ -149,13 +149,13 @@ def _map_finding(f: AuditFinding) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/version")
+@router.get("/version", summary="规则版本")
 async def erp_version() -> dict[str, str]:
     """规则版本（ERP 侧 ai_rule_set 登记 / 巡检用）。"""
     return {"rule_version": RULE_VERSION, "code_ref": CODE_REF}
 
 
-@router.post("/audit")
+@router.post("/audit", summary="无状态审核")
 async def erp_audit(req: ErpAuditRequest) -> dict[str, Any]:
     """无状态送审：DTO 进、结论出（不落 store、不建 audit_id、零 LLM）。"""
     if req.dto_version != DTO_VERSION:
