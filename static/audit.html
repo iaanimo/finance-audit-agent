@@ -243,6 +243,29 @@
   .who-agent { background: #e8eefc; color: var(--brand); }
   .who-human { background: var(--pass-bg); color: var(--pass); }
 
+  /* 审核台待办（收件箱） */
+  header .badge {
+    display: inline-block; min-width: 16px; padding: 0 4px; margin-left: 2px;
+    border-radius: 8px; background: var(--fail); color: #fff; font-size: 10px;
+    text-align: center; line-height: 16px;
+  }
+  .inbox-panel {
+    position: fixed; top: 56px; right: 22px; z-index: 40; width: 380px;
+    max-height: min(520px, 70vh); overflow-y: auto;
+    background: #fff; border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(16, 24, 40, .12);
+  }
+  .inbox-panel .head {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px; border-bottom: 1px solid var(--line);
+    font-weight: 600; font-size: 12px; position: sticky; top: 0; background: #fff;
+  }
+  .inbox-panel .item { padding: 10px 12px; border-bottom: 1px solid #f0f2f5; cursor: pointer; }
+  .inbox-panel .item:hover { background: #f7f9ff; }
+  .inbox-panel .sub { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+  .inbox-panel .meta { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+  .inbox-panel .body { color: #374151; font-size: 12px; white-space: pre-wrap; }
+
   .toast {
     position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
     background: #1a1d23; color: #fff; padding: 9px 18px; border-radius: 5px;
@@ -257,11 +280,20 @@
   <h1>财务报销审核台</h1>
   <span class="tag">受控 AGENT</span>
   <div class="links">
+    <button class="linkbtn" id="inboxBtn" style="display:none"
+            title="审核台待办：agent 分派过来的单子（处理完会自动清零）">收件箱 <span class="badge" id="inboxCount">0</span></button>
     <button class="linkbtn" id="resetBtn" style="display:none"
             title="仅演示模式可用。会计凭证与审计轨迹依法最低保管 30 年，真实系统里只能红冲、不能删除。">清空演示数据（仅演示模式）</button>
     <a href="/docs" target="_blank">接口文档 →</a>
   </div>
 </header>
+
+<div class="inbox-panel" id="inboxPanel" style="display:none">
+  <div class="head">审核台待办
+    <button class="linkbtn" id="inboxClose" title="关闭">关闭</button>
+  </div>
+  <div id="inboxList"></div>
+</div>
 
 <div class="wrap">
 
@@ -1105,8 +1137,65 @@ function loadWho(auditId) {
     });
 }
 
+/* ---------------- 审核台待办（收件箱） ----------------
+ * agent 分派过来的通知都落在这里：待复核 / 补料请求。点一条 = 标记已读 + 打开该单。
+ * 计数用 open（未处理）而不是 unread（未打开）—— 处理完就该清零。
+ */
+var inboxMessages = [];
+
+function loadInbox() {
+  fetch('/api/agent/inbox').then(function (r) { return r.json(); }).then(function (d) {
+    inboxMessages = d.messages || [];
+    var n = d.open || 0;
+    var btn = el('inboxBtn'); if (!btn) return;
+    btn.style.display = n ? '' : 'none';
+    el('inboxCount').textContent = n;
+    var panel = el('inboxPanel');
+    if (panel && panel.style.display !== 'none') renderInbox();
+  }).catch(function () { /* 收件箱不可用不影响审核台本身 */ });
+}
+
+function renderInbox() {
+  var box = el('inboxList');
+  if (!box) return;
+  if (!inboxMessages.length) { box.innerHTML = '<div class="hint" style="padding:12px">没有待办</div>'; return; }
+  var html = '';
+  inboxMessages.forEach(function (m) {
+    html += '<div class="item" data-id="' + esc(m.id) + '" data-audit="' + esc(m.audit_id) + '">' +
+      '<div class="sub">' + esc(m.subject || '') + '</div>' +
+      '<div class="meta">' + esc(String(m.ts || '').replace('T', ' ').slice(0, 19)) + '</div>' +
+      '<div class="body">' + esc(m.body || '') + '</div></div>';
+  });
+  box.innerHTML = html;
+  Array.prototype.forEach.call(box.querySelectorAll('.item'), function (node) {
+    node.addEventListener('click', function () {
+      var id = node.getAttribute('data-id');
+      var auditId = node.getAttribute('data-audit');
+      fetch('/api/agent/inbox/' + encodeURIComponent(id) + '/read', { method: 'POST' })
+        .catch(function () { /* 已读失败不挡打开 */ })
+        .then(function () { loadInbox(); toggleInbox(false); openAudit(auditId); });
+    });
+  });
+}
+
+function toggleInbox(show) {
+  var panel = el('inboxPanel'); if (!panel) return;
+  var on = typeof show === 'boolean' ? show : panel.style.display === 'none';
+  panel.style.display = on ? '' : 'none';
+  if (on) renderInbox();
+}
+
+el('inboxBtn').addEventListener('click', function (e) { e.stopPropagation(); toggleInbox(); });
+el('inboxClose').addEventListener('click', function () { toggleInbox(false); });
+document.addEventListener('click', function (e) {
+  var panel = el('inboxPanel');
+  if (!panel || panel.style.display === 'none') return;
+  if (!panel.contains(e.target) && !el('inboxBtn').contains(e.target)) toggleInbox(false);
+});
+
 /* ---------------- 审核单列表 ---------------- */
 function loadAuditList() {
+  loadInbox();   // 列表刷新时顺带刷待办角标（同一个数据源变化点）
   fetch('/api/audit/list').then(function (r) { return r.json(); }).then(function (d) {
     var box = el('auditList');
     var items = d.audits || [];
