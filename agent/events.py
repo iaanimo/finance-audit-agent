@@ -66,8 +66,93 @@ DOCUMENT_SUFFIXES = (".pdf", ".xml", ".html", ".ofd", ".png", ".jpg", ".jpeg")
 DONE_DIR = "done"
 FAILED_DIR = "failed"
 LEDGER_NAME = ".processed.jsonl"
+LOCK_NAME = ".scan.lock"
 
 BuildRequest = Callable[[dict], ReimbursementRequest]
+
+
+class ScanInProgress(RuntimeError):
+    """另一轮扫描正在进行。**不排队** —— 直接拒绝，调用方稍后重试。
+
+    为什么不等：扫描一轮要读文件、跑判定，而 ``/api/agent/scan`` 是 HTTP 端点，
+    等在事件循环里空转比返回 409 更糟。两个并发的扫描没有"合并"的语义可言，
+    它们争的是同一批文件。
+    """
+
+
+class ScanLock:
+    """跨进程的扫描互斥锁。非阻塞获取，抢不到就抛 :class:`ScanInProgress`。
+
+    同一进程内两个线程、或两个进程同时扫同一个收件口，都会在这里被挡住 ——
+    否则同一份材料可能被受理两次（幂等键是事后判断，锁是事前互斥，两者都要）。
+    """
+
+    def __init__(self, root: str | Path):
+        self.root = Path(root)
+        self._fh = None
+
+    def acquire(self) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        fh = (self.root / LOCK_NAME).open("a+b")
+        if not _try_lock(fh):
+            fh.close()
+            raise ScanInProgress(f"{self.root} 正在被另一轮扫描处理，稍后重试")
+        self._fh = fh
+
+    def release(self) -> None:
+        if self._fh is None:
+            return
+        _unlock(self._fh)
+        self._fh.close()
+        self._fh = None
+
+    def __enter__(self) -> "ScanLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
+
+
+def _try_lock(fh) -> bool:
+    """非阻塞加锁（Windows 用 msvcrt，POSIX 用 fcntl）。成功 True，被占 False。
+
+    ⚠️ 这里**不能**先 ``read(1)`` 判断文件是否为空：字节区锁一旦被别的句柄持有，
+    读同一个区域会直接 PermissionError（Windows 实测），而"被占"应该返回 False
+    而不是抛异常。改用 ``seek(0, 2) + tell()`` 求大小 —— 不读任何字节。
+    """
+    fh.seek(0, 2)
+    if fh.tell() == 0:
+        fh.write(b"\0")
+        fh.flush()
+    fh.seek(0)
+    try:
+        import msvcrt
+    except ImportError:  # POSIX
+        import fcntl
+
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+    try:
+        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(fh) -> None:
+    fh.seek(0)
+    try:
+        import msvcrt
+    except ImportError:  # POSIX
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return
+    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 @dataclass(frozen=True)
@@ -128,7 +213,19 @@ class DirectorySource:
 
         返回**本轮真正新受理的报告**（幂等跳过的、失败的都不在里面）——
         调用方（server 端点 / CLI）据此展示，不用自己再筛。
+
+        整轮扫描持有 :class:`ScanLock`：两个扫描同时跑会争同一批文件，
+        而幂等键只能在"处理完"之后才写得进账本 —— 锁是事前互斥，幂等是事后兜底，
+        两者缺一不可（缺锁时，重复受理会真的发生）。
         """
+        lock = ScanLock(self.root)
+        lock.acquire()
+        try:
+            return await self._poll_locked(runtime)
+        finally:
+            lock.release()
+
+    async def _poll_locked(self, runtime: AgentRuntime) -> list[RunReport]:
         handled: list[RunReport] = []
         seen = self.ledger_ids()
 

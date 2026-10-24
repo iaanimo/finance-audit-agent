@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from agent import AgentRuntime, Inbox
-from agent.events import DirectorySource
+from agent.events import DirectorySource, ScanInProgress, ScanLock
 from finance.store import AuditStore
 from server import _build_request  # 复用唯一一份申请单校验
 
@@ -112,8 +112,10 @@ def test_redelivery_creates_no_second_audit(source, runtime, inbound):
     assert second == []
     assert len(runtime.store.list_audits()) == 1
     assert len(source.ledger()) == 1  # 账本只有一条：同一件事只记一次
-    # 收件口被清空（账本文件除外），不会堆在那里反复被扫
-    leftover = [p.name for p in inbound.iterdir() if p.is_file() and p.name != ".processed.jsonl"]
+    # 收件口被清空（账本与扫描锁这两个隐藏文件除外），不会堆在那里反复被扫
+    leftover = [
+        p.name for p in inbound.iterdir() if p.is_file() and not p.name.startswith(".")
+    ]
     assert leftover == []
 
 
@@ -162,3 +164,20 @@ def test_non_document_files_are_ignored(source, runtime, inbound):
 def test_builder_is_required():
     with pytest.raises(TypeError):
         DirectorySource("somewhere")  # type: ignore[call-arg]
+
+
+def test_concurrent_scan_is_refused_not_duplicated(source, runtime, inbound):
+    """两轮扫描不能同时跑：幂等键要等处理完才写得进账本，锁必须事前互斥。"""
+    _drop(inbound)
+    lock = ScanLock(inbound)
+    lock.acquire()
+    try:
+        with pytest.raises(ScanInProgress):
+            asyncio.run(source.poll_once(runtime))
+    finally:
+        lock.release()
+
+    # 被挡住的那次没有受理任何东西；锁释放后正常处理一次，且只有一张单
+    assert runtime.store.list_audits() == []
+    assert len(asyncio.run(source.poll_once(runtime))) == 1
+    assert len(runtime.store.list_audits()) == 1

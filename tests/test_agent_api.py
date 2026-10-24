@@ -18,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
+from agent.events import ScanLock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SAMPLES_PDF = PROJECT_ROOT / "finance" / "samples" / "pdf"
@@ -140,6 +141,21 @@ def test_no_endpoint_can_approve_on_behalf_of_human(client):
         for method in methods:
             # 只允许 POST 触发"补动作/扫描/已读"，不允许 PUT/PATCH 之类
             assert method in {"get", "post"}, f"{path} 用了 {method}"
+
+
+def test_scan_returns_409_while_another_scan_runs(client, temp_data_dir):
+    inbound = temp_data_dir / "inbound"
+    inbound.mkdir(parents=True, exist_ok=True)
+    lock = ScanLock(inbound)
+    lock.acquire()
+    try:
+        resp = client.post("/api/agent/scan")
+        assert resp.status_code == 409
+        assert "正在" in resp.json()["detail"]
+    finally:
+        lock.release()
+    # 锁释放后恢复可用
+    assert client.post("/api/agent/scan").status_code == 200
 
 
 def test_upload_entry_also_records_agent_events(client):

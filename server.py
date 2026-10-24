@@ -39,7 +39,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from agent import Action, Gate, Inbox
-from agent.events import DirectorySource
+from agent.events import DirectorySource, ScanInProgress
 from agent.runtime import REVIEW_DESK, AgentRuntime
 from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
@@ -592,7 +592,10 @@ async def agent_scan():
     source = DirectorySource(
         resolve_data_path(AGENT_INBOUND_DIR_NAME), build_request=_build_request
     )
-    reports = await source.poll_once(_agent_runtime())
+    try:
+        reports = await source.poll_once(_agent_runtime())
+    except ScanInProgress as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     return {"handled": [r.to_dict() for r in reports], "inbound": str(source.root)}
 
 
