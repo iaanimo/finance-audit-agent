@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -283,7 +283,71 @@ def test_recover_leaves_midway_states_to_humans(runtime, store):
 
 
 # --------------------------------------------------------------------------
-# 6. 时间线：谁做了什么，能一眼看出来
+# 6. 催办：调用时判断，不是定时任务
+# --------------------------------------------------------------------------
+
+
+def test_remind_fires_only_after_threshold(runtime, store):
+    report = _submit(runtime, "S01_hotel_ok.pdf")
+    saved = store.load(report.audit_id)
+
+    assert runtime.remind_stale(now=saved.created_at + timedelta(hours=10)) == []
+
+    out = runtime.remind_stale(now=saved.created_at + timedelta(hours=49))
+    assert len(out) == 1
+    assert out[0]["to"] == REVIEW_DESK
+    msgs = [m for m in runtime.inbox.messages_for(REVIEW_DESK) if m["kind"] == "reminder"]
+    assert len(msgs) == 1
+
+
+def test_remind_is_idempotent_within_one_window(runtime, store):
+    report = _submit(runtime, "S01_hotel_ok.pdf")
+    base = store.load(report.audit_id).created_at
+    later = base + timedelta(hours=49)
+
+    assert len(runtime.remind_stale(now=later)) == 1
+    # 同一个 48h 窗口内再调：不重复投
+    assert runtime.remind_stale(now=later + timedelta(minutes=5)) == []
+
+
+def test_remind_caps_total_per_audit(runtime, store):
+    report = _submit(runtime, "S01_hotel_ok.pdf")
+    base = store.load(report.audit_id).created_at
+
+    assert len(runtime.remind_stale(now=base + timedelta(hours=49))) == 1
+    assert len(runtime.remind_stale(now=base + timedelta(hours=97))) == 1
+    # 第三次超过上限：不再催
+    assert runtime.remind_stale(now=base + timedelta(hours=145)) == []
+
+
+def test_remind_goes_to_applicant_when_waiting_for_materials(runtime, store):
+    report = _submit(
+        runtime,
+        "S08_meal_no_headcount.pdf",
+        expense_type="餐饮费",
+        amount="600.00",
+        nights=None,
+        headcount=None,
+        reason="客户工作餐",
+    )
+    base = store.load(report.audit_id).created_at
+
+    out = runtime.remind_stale(now=base + timedelta(hours=49))
+    assert len(out) == 1
+    assert out[0]["to"] == "张三"  # 要过材料 → 球在申请人那边
+    assert runtime.inbox.messages_for("张三")[-1]["kind"] == "reminder"
+
+
+def test_remind_skips_decided(runtime, store):
+    report = _submit(runtime, "S01_hotel_ok.pdf")
+    saved = store.load(report.audit_id)
+    decide(saved, Decision.APPROVED, "李会计", store=store)
+
+    assert runtime.remind_stale(now=saved.created_at + timedelta(hours=49)) == []
+
+
+# --------------------------------------------------------------------------
+# 7. 时间线：谁做了什么，能一眼看出来
 # --------------------------------------------------------------------------
 
 

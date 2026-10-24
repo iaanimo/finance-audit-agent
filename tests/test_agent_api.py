@@ -131,6 +131,13 @@ def test_recover_endpoint_reports_nothing_when_clean(client):
     assert client.post("/api/agent/recover").json() == {"recovered": []}
 
 
+def test_remind_endpoint_is_callable(client):
+    """催办是"调用时判断"，端点必须能调；没有超时单时返回空列表。"""
+    resp = client.post("/api/agent/remind")
+    assert resp.status_code == 200
+    assert resp.json() == {"reminded": []}
+
+
 def test_no_endpoint_can_approve_on_behalf_of_human(client):
     """agent 这一层没有"批准"入口 —— 有的话，前面所有设计都白做。"""
     paths = client.get("/openapi.json").json()["paths"]

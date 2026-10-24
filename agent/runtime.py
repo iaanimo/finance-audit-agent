@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -231,6 +232,70 @@ class AgentRuntime:
             )
         return count
 
+    def remind_stale(
+        self,
+        *,
+        now: datetime | None = None,
+        threshold_hours: float = 48.0,
+        max_per_audit: int = 2,
+        actor: Actor | None = None,
+    ) -> list[dict[str, Any]]:
+        """催办：给超过 ``threshold_hours`` 还没处理的单子再发一条提醒。
+
+        **这不是定时任务** —— 没有后台线程、没有调度器。判断发生在**调用时**：
+        谁调（HTTP 端点 / 外部 cron / 人手动）就在那一刻算"哪些单超时了"。
+        好处是 `now` 可以注入，测试能精确验证"49 小时会催、10 小时不会"，
+        不用等真时间。
+
+        三条约束：
+        - 只催还在 ``pending_review``、没人做过决定的单；
+        - 每个"时间窗"只催一次（窗口 = 已等待时长 // 阈值），且累计不超过
+          ``max_per_audit`` 次 —— 催办变成骚扰就没人看了；
+        - 收件人跟着上一次分派走：要过材料就催申请人，否则催审核台。
+        """
+        actor = actor or self.agent
+        now = now or datetime.now(timezone.utc)
+        reminded: list[dict[str, Any]] = []
+
+        for result in self.store.all_records():
+            if result.decision is not None:
+                continue
+            if result.state is not AuditState.PENDING_REVIEW:
+                continue
+
+            age_hours = (now - result.created_at).total_seconds() / 3600
+            if age_hours < threshold_hours:
+                continue
+
+            events = self.store.read_log(result.audit_id)
+            sent = [
+                e
+                for e in events
+                if e.get("event") == EV_ACTION
+                and e.get("action") == Action.REMIND.value
+                and e.get("result") == "sent"
+            ]
+            if len(sent) >= max_per_audit:
+                continue
+
+            window = int(age_hours // threshold_hours)
+            to = _remind_target(events, result)
+            step = self._act(
+                Action.REMIND,
+                actor,
+                result,
+                to=to,
+                kind="reminder",
+                dedupe_key=f"{result.audit_id}:remind:{window}",
+                subject=f"【催办】{result.request.applicant} {result.request.expense_type} 单待处理",
+                body=_reminder_body(result, age_hours),
+            )
+            if step.outcome == "sent":
+                reminded.append(
+                    {"audit_id": result.audit_id, "to": to, "age_hours": round(age_hours, 1)}
+                )
+        return reminded
+
     def timeline(self, audit_id: str) -> list[dict[str, Any]]:
         """把轨迹转成"谁做了什么"的时间线，供 UI 与排查用。
 
@@ -391,6 +456,36 @@ class AgentRuntime:
 # 《人工智能生成合成内容标识办法》的"生成内容"，要么加标识、要么做披露，
 # 而这个场景根本不需要模型的文采。模板化还顺带解决了另一个问题：
 # 通知里的每一句都能被测试断言，模型生成的不能。
+
+
+def _remind_target(events: list[dict[str, Any]], result: AuditResult) -> str:
+    """催办发给谁：跟着上一次分派走。
+
+    要过材料（``request_info``）说明球在申请人那边；其余情况球在审核台。
+    不按"谁最后没动"猜 —— 那需要读心，而分派记录是确定的。
+    """
+    for event in reversed(events):
+        if (
+            event.get("event") == EV_ACTION
+            and event.get("action") == Action.REQUEST_INFO.value
+        ):
+            return result.request.applicant.strip() or "申请人"
+    return REVIEW_DESK
+
+
+def _reminder_body(result: AuditResult, age_hours: float) -> str:
+    lines = [
+        f"单号：{result.audit_id}　申请人：{result.request.applicant}",
+        f"已等待 {age_hours:.0f} 小时仍未处理（系统建议：{result.suggested_status.value}）。",
+    ]
+    if result.blocking_findings:
+        lines.append("命中驳回项：" + "、".join(f.rule_id for f in result.blocking_findings))
+    elif result.warning_findings:
+        lines.append("待补疑点：" + "、".join(f.rule_id for f in result.warning_findings))
+    else:
+        lines.append("全部规则通过，等待人工签批。")
+    lines.append("请尽快处理；本条为系统程序性提醒，不改变任何判定。")
+    return "\n".join(lines)
 
 
 def _blocking_body(result: AuditResult) -> str:

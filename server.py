@@ -98,7 +98,8 @@ API_DESCRIPTION = """
 
 当前只有**目录轮询**这一条事件源：把「发票 + 申请单」成对放进 `data/inbound/`，
 调用 `POST /api/agent/scan` 扫一轮。**没有后台调度器**，也没有 webhook ——
-定时催办（`REMIND`）尚未实现，因此本版本不会自己"醒来"。
+催办不是定时任务：调用 `POST /api/agent/remind` 时才判断哪些单超时，
+因此本版本不会自己"醒来"。
 """
 
 app = FastAPI(
@@ -669,6 +670,15 @@ async def agent_inbox_read(message_id: str, who: str = REVIEW_DESK):
 async def agent_recover():
     """断点恢复：只补发漏掉的动作，**不重跑判定**。"""
     return {"recovered": [r.to_dict() for r in _agent_runtime().recover()]}
+
+
+@app.post("/api/agent/remind", tags=["Agent 编排"], summary="催办超时单据")
+async def agent_remind():
+    """催办：给超过 48 小时还没处理的单子再发一条提醒。
+
+    **不是定时任务** —— 调用这个端点时才判断哪些单超时；没有后台调度器。
+    """
+    return {"reminded": _agent_runtime().remind_stale()}
 
 
 @app.post("/api/agent/scan", tags=["Agent 编排"], summary="扫描收件口（事件源）")
