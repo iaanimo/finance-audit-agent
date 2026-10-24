@@ -11,7 +11,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import server
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _schema() -> dict:
@@ -71,6 +75,23 @@ def test_409_has_two_known_meanings():
     """409 在本项目有两种含义（已决定 / 扫描中），文档必须分开写。"""
     desc = _schema()["info"]["description"]
     assert "已被决定" in desc and "扫描正在进行" in desc
+
+
+def test_version_is_declared_consistently():
+    """应用版本只认 server.APP_VERSION 一处，且必须出现在 CHANGELOG 里。
+
+    版本漂移是发布期最常见的"文档说谎"：代码升了、CHANGELOG 没写、
+    /docs 还显示旧版本。这条测试把它们钉在一起。
+    """
+    from fastapi.testclient import TestClient
+
+    assert _schema()["info"]["version"] == server.APP_VERSION
+
+    changelog = (PROJECT_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert f"## [{server.APP_VERSION}]" in changelog, "CHANGELOG 缺当前版本条目"
+
+    with TestClient(server.app) as client:  # 健康检查不写盘，无需临时目录
+        assert client.get("/api/health").json()["version"] == server.APP_VERSION
 
 
 def test_request_examples_are_provided():

@@ -73,6 +73,11 @@ def setup_logging() -> None:
         ],
     )
 
+#: 应用版本（发布用）。规则版本在 ``finance/erp_api.py::RULE_VERSION``——
+#: 两者不同步：应用可以改界面、加端点而不动规则；规则一改就必须升 RULE_VERSION，
+#: 否则历史结论没法按当时版本复算。
+APP_VERSION = "1.0.0"
+
 API_DESCRIPTION = """
 财务报销审核受控 Agent —— 接口文档。
 
@@ -115,6 +120,7 @@ API_DESCRIPTION = """
 app = FastAPI(
     title="财务报销审核受控 Agent",
     description=API_DESCRIPTION,
+    version=APP_VERSION,
     docs_url="/docs",
     openapi_tags=[
         {"name": "核心审核", "description": "提交、查看、人工决定。判定零 LLM，结论可复现。"},
@@ -402,7 +408,7 @@ async def audit_page():
 @app.get("/api/health", include_in_schema=False, tags=["系统"], summary="健康检查（含演示模式标志）")
 async def health():
     """健康检查。顺带告诉页面当前是不是演示模式 —— 页面据此决定显不显示清空按钮。"""
-    return {"status": "ok", "demo_mode": DEMO_MODE}
+    return {"status": "ok", "demo_mode": DEMO_MODE, "version": APP_VERSION}
 
 
 # ---------------------------------------------------------------------------
