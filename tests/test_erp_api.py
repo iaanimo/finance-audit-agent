@@ -1,11 +1,11 @@
-"""ERP 无状态审核接口（finance/erp_api.py）测试
-===============================================
+"""无状态集成接口（finance/erp_api.py）测试
+===========================================
 
-钉住契约四件事：
+钉住四件事：
 1. GET /version 必带 rule_version + code_ref；
 2. POST /audit 无状态（响应无 audit_id、不碰 AuditStore/run_audit）、零 LLM；
 3. severity 三档映射：PASS→info / WARN→warn / FAIL→block / N/A→info / 异常→warn；
-4. DTO 问题 → 400 且**响应体仍带 rule_version**（契约：任何响应必带）。
+4. DTO 问题 → 400 且**响应体仍带 rule_version**（任何响应必带）。
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def test_unsupported_dto_version_rejected() -> None:
 
 
 def test_null_partner_tolerated() -> None:
-    """真连实测裂缝修复：ERP 无对手方时显式送 partner=null——接收方必须宽容。"""
+    """外部系统可能没有对手方，显式送 partner=null —— 接收方必须宽容。"""
     resp = client.post("/audit", json=_minimal_doc(partner=None))
     assert resp.status_code == 200
     assert resp.json()["rule_version"] == erp_api.RULE_VERSION

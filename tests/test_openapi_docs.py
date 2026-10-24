@@ -35,7 +35,7 @@ def test_page_routes_are_hidden_from_schema():
 def test_every_route_is_grouped_and_business_named():
     schema = _schema()
     groups = {t["name"] for t in schema.get("tags", [])}
-    assert {"核心审核", "Agent 编排", "ERP 集成", "系统"} <= groups
+    assert {"核心审核", "Agent 编排", "集成接口", "系统"} <= groups
     assert "default" not in groups
 
     for path, ops in schema["paths"].items():

@@ -83,7 +83,7 @@ API_DESCRIPTION = """
 
 ## 这个接口能做什么、不能做什么
 
-- **判定零 LLM**：19 条规则由 Python 逐条算出，结论可复现；每个响应都带 `rule_version`，供 ERP 事后按版本复算。
+- **判定零 LLM**：19 条规则由 Python 逐条算出，结论可复现；每个响应都带 `rule_version`，供调用方事后按版本复算。
 - `/api/audit/{audit_id}/decide` 是**唯一**能批准报销的入口，必须由人调用并填写操作人。
 - Agent 层只能把单据推进到「待签批」：它可以通知、要材料、补发消息，**不能**批准、付款、归档。
 - 审计日志是只追加的哈希链：**改了能被发现**（见 `GET /api/audit/{id}/log`），但它不是可信时间戳，也不是法律级电子签名。
@@ -125,13 +125,13 @@ app = FastAPI(
     openapi_tags=[
         {"name": "核心审核", "description": "提交、查看、人工决定。判定零 LLM，结论可复现。"},
         {"name": "Agent 编排", "description": "事件源扫描、断点恢复、时间线、收件箱。Agent 只能推进到待签批，不能签字。"},
-        {"name": "ERP 集成", "description": "无状态审核接口：DTO 进、结论出，不落本地 store。供 ERP 联调。"},
+        {"name": "集成接口", "description": "无状态审核：DTO 进、结论出，不落本地 store；对接方自行组装 DTO。"},
         {"name": "系统", "description": "健康检查与演示数据维护。清空仅在 --demo 下可用。"},
     ],
 )
 
-# ERP 无状态审核接口（G3-4b 集成壳）：POST /audit + GET /version
-# ——DTO 进结论出、不落 store、零 LLM，契约见 finance/erp_api.py
+# 无状态集成接口：POST /audit + GET /version
+# ——DTO 进结论出、不落 store、零 LLM；输入输出形状见 finance/erp_api.py
 app.include_router(_erp_router)
 
 AUDIT_STORE = AuditStore()
