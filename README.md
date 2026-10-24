@@ -642,14 +642,6 @@ curl http://127.0.0.1:8100/api/agent/inbox
   （`BudgetProvider` 接口已留，接 ERP/OA 后即为实时余额）。
 - **单用户、无鉴权。** 目前是单机单用户运行，身份与权限体系尚未接入
   （`OperatorDirectory` 接口已留，见「生产接入清单」）；这是**当前阶段**，不是项目定位。
-- **上传入口与事件源是两条路径。** `/api/audit/run` 直接调 `run_audit`；
-  事件源（`/api/agent/scan`）走 `runtime.submit`。因此从上传入口提交的单据没有
-  `agent.*` 事件，`/api/agent/{id}/timeline` 里只有 system / human 两类触发者。
-  统一入口前，这个差异会直接体现在轨迹里。
-- **`--demo` 重置只覆盖部分运行状态。** 它清空审核单与上传件，不清
-  `data/inbound/.processed.jsonl` 与 `data/inbox/`：重置后重新投放同一份材料，
-  仍会被账本判为已受理并直接移入 `done/`。`data/archive/` 同样不清 ——
-  它属于会计档案，不是运行状态。
 
 ---
 

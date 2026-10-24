@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import shutil
 from pathlib import Path
@@ -41,6 +42,10 @@ def temp_data_dir(tmp_path, monkeypatch):
         def __init__(self) -> None:
             self.project_root = tmp_path
             self.data_dir = tmp_path / "data"
+            # 没有 Key：叙述层应自动退回模板，而不是让审核失败
+            self.api_key = ""
+            self.base_url = ""
+            self.model = ""
 
     monkeypatch.setattr("tools.file_ops.get_settings", lambda: _FakeSettings())
     monkeypatch.setattr("config.settings.get_settings", lambda: _FakeSettings())
@@ -135,3 +140,55 @@ def test_no_endpoint_can_approve_on_behalf_of_human(client):
         for method in methods:
             # 只允许 POST 触发"补动作/扫描/已读"，不允许 PUT/PATCH 之类
             assert method in {"get", "post"}, f"{path} 用了 {method}"
+
+
+def test_upload_entry_also_records_agent_events(client):
+    """上传入口与事件源走同一条受理路径：任意入口进来的单子都有完整轨迹。"""
+    pdf = SAMPLES_PDF / "S01_hotel_ok.pdf"
+    if not pdf.is_file():
+        pytest.skip("样本票缺失")
+    resp = client.post(
+        "/api/audit/run",
+        json={
+            "filename": "S01_hotel_ok.pdf",
+            "content_b64": base64.b64encode(pdf.read_bytes()).decode(),
+            "request": dict(CLAIM),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    audit_id = resp.json()["audit_id"]
+
+    timeline = client.get(f"/api/agent/{audit_id}/timeline").json()["timeline"]
+    events = [row["event"] for row in timeline]
+    assert "agent.run.started" in events
+    assert "agent.run.finished" in events
+    assert any(row["actor_type"] == "agent" for row in timeline)
+
+    inbox = client.get("/api/agent/inbox").json()
+    assert inbox["messages"][0]["audit_id"] == audit_id
+
+
+def test_reset_clears_agent_state_but_keeps_archive(client, temp_data_dir, monkeypatch):
+    """重置要覆盖 agent 侧运行状态，但**不得**碰已归档的终稿。"""
+    _drop(temp_data_dir / "inbound")
+    assert len(_scan(client)) == 1
+
+    archive_dir = temp_data_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    kept = archive_dir / "kept.final.json"
+    kept.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(server, "DEMO_MODE", True)
+    resp = client.post("/api/audit/reset")
+    assert resp.status_code == 200
+    assert resp.json()["agent_state_removed"] >= 1
+
+    # 事件源账本与收件箱清空
+    assert not (temp_data_dir / "inbound" / ".processed.jsonl").exists()
+    assert client.get("/api/agent/inbox").json()["messages"] == []
+    # 档案保留：它不是运行状态
+    assert kept.is_file(), "会计档案不是运行状态，重置无权删除"
+
+    # 重置后同一份材料可以再次受理
+    _drop(temp_data_dir / "inbound")
+    assert len(_scan(client)) == 1

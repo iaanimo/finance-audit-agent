@@ -30,6 +30,7 @@ import argparse
 import base64
 import binascii
 import logging
+import shutil
 import uuid
 from pathlib import Path
 
@@ -42,7 +43,7 @@ from agent.events import DirectorySource
 from agent.runtime import REVIEW_DESK, AgentRuntime
 from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
-from finance.audit import AuditError, OverrideReasonRequired, decide, run_audit
+from finance.audit import AuditError, OverrideReasonRequired, decide
 from finance.advice import suggest_advice
 from finance.erp_api import router as _erp_router
 from finance.policy import load_policy_bundle
@@ -292,9 +293,15 @@ async def audit_run(req: AuditRunRequest):
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(blob)
 
+    # 上传入口与事件源走**同一条受理路径**（runtime.submit → run_audit）。
+    # 否则同一张票从不同入口进来，轨迹不一样：一条有 agent 事件，一条没有 ——
+    # 而"每一步谁触发的"正是这一层要回答的问题。
     try:
-        result = await run_audit(
-            target, request, store=AUDIT_STORE, use_vision=req.use_vision,
+        report = await _agent_runtime().submit(
+            target,
+            request,
+            narrative_llm="auto",  # 与改造前一致：有 Key 就润色，没 Key 自动退回模板
+            use_vision=req.use_vision,
             invoice_overrides=req.invoice_overrides,
             field_changes=req.field_changes,
             confirmed_by=req.confirmed_by or request.applicant,
@@ -302,6 +309,10 @@ async def audit_run(req: AuditRunRequest):
     except Exception as exc:  # noqa: BLE001 —— 抽取失败给人话提示，不是 500
         logger.warning("audit run failed: %s", exc)
         raise HTTPException(status_code=422, detail=f"发票处理失败：{exc}")
+
+    result = AUDIT_STORE.load(report.audit_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="审核单写入后读取失败。")
 
     logger.info(
         "audit=%s suggested=%s narrative_source=%s",
@@ -487,8 +498,29 @@ async def audit_reset():
         for f in upload_dir.iterdir():
             if f.is_file():
                 f.unlink()
-    logger.info("audit demo reset: %s files removed", removed)
-    return {"removed": removed}
+    agent_removed = _reset_agent_state()
+    logger.info("audit demo reset: %s files removed (agent state: %s)", removed, agent_removed)
+    return {"removed": removed, "agent_state_removed": agent_removed}
+
+
+def _reset_agent_state() -> int:
+    """清掉 agent 侧的**运行状态**：事件源账本/收件口、站内收件箱。
+
+    **不碰 ``data/archive/``** —— 它是会计档案，不是运行状态。重置接口的语义
+    是"把运行环境恢复到初始"，不是"删除已归档的终稿"；后者正是本项目拒绝做的事。
+    """
+    removed = 0
+    for name in (AGENT_INBOUND_DIR_NAME, "inbox"):
+        directory = resolve_data_path(name)
+        if not directory.is_dir():
+            continue
+        for child in directory.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------
