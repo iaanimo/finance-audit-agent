@@ -109,8 +109,16 @@ class AgentRuntime:
         self.gate = gate or Gate()
         self.policy = policy
         self.agent = agent or agent_actor()
-        # 收件箱默认跟着 store 的数据目录走（data/inbox），演示时不用另配
-        self.inbox = inbox or Inbox(base_dir=Path(store.base_dir).parent / "inbox")
+        self._inbox = inbox
+
+    @property
+    def inbox(self) -> Inbox:
+        """收件箱。**惰性解析默认目录** —— 构造时算路径会把 ``data/`` 冻结在
+        import 时刻，测试一改配置就往真实目录写（store 那边踩过同一个坑，A1）。
+        默认跟着 store 的数据目录走（``data/inbox``）。"""
+        if self._inbox is None:
+            self._inbox = Inbox(base_dir=Path(self.store.base_dir).parent / "inbox")
+        return self._inbox
 
     # ---- 主流程 ----
 

@@ -4,11 +4,12 @@
 这一层存在的理由，一句话：**把"人跑批处理"变成"系统自己推进"，但不改变
 任何一条判定，也不接管任何一个签字。**
 
-四块积木
+五块积木
 
 - :mod:`agent.actors`  —— 谁是触发者（日志里必须有名字）
 - :mod:`agent.gate`    —— 动作分级（谁能做哪一步，越级就抛）
 - :mod:`agent.inbox`   —— 站内收件箱（L1 通知的落点，不接真通道）
+- :mod:`agent.events`  —— 事件源（目录轮询：文档 + 申请单成对投放，幂等）
 - :mod:`agent.runtime` —— 编排（调 finance.audit，然后"该通知的通知、该要料的要料"）
 
 与 finance 的边界
@@ -22,6 +23,7 @@ agent 层不许出现 ``decide(`` / ``store.save(`` / ``.state = AuditState``。
 """
 
 from .actors import AGENT_NAME, Actor, ActorType, agent_actor, human, system
+from .events import DirectorySource, InboundEvent
 from .gate import (
     AGENT_MAX_TIER,
     AGENT_TOOL_ACTIONS,
@@ -44,6 +46,8 @@ __all__ = [
     "agent_actor",
     "human",
     "system",
+    "DirectorySource",
+    "InboundEvent",
     "AGENT_MAX_TIER",
     "AGENT_TOOL_ACTIONS",
     "ACTION_SPECS",

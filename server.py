@@ -15,6 +15,10 @@ LLM 只在这条管线的两端出现 —— 入口的字段抽取、出口的�
 这不是"没用上 agent 能力"，这是**设计**：财务审核的结论必须可复现，
 不能交给一个会自由发挥的循环。
 
+`agent/` 包是**另一层**，且只在外围：它调用 ``run_audit`` 之后决定"通知谁、要什么材料"，
+并把每一步写进审计日志。它拿不到批准、付款、归档的钥匙（见 ``agent/gate.py`` 的 L0–L3），
+所以"有 agent"和"判定可复现"这两件事并不冲突。
+
 **一个实测过的坑**：本机（以及绝大多数精简部署）没有装 ``python-multipart``，
 所以 **不能用** ``UploadFile`` / ``File()`` / ``Form()`` —— 一写就 500。
 发票文件走 base64 塞进 JSON 传输。
@@ -33,6 +37,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
+from agent import Action, Gate, Inbox
+from agent.events import DirectorySource
+from agent.runtime import REVIEW_DESK, AgentRuntime
 from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
 from finance.audit import AuditError, OverrideReasonRequired, decide, run_audit
@@ -74,6 +81,8 @@ app.include_router(_erp_router)
 AUDIT_STORE = AuditStore()
 SAMPLE_DIR = HERE / "finance" / "samples"
 UPLOAD_DIR_NAME = "uploads"
+#: 事件源收件口：``data/inbound/`` 下"文档 + 申请单"成对出现即被受理。
+AGENT_INBOUND_DIR_NAME = "inbound"
 
 #: 演示模式。**只有显式 `--demo` 启动时才为 True**，唯一作用是开放「清空演示数据」。
 #:
@@ -480,6 +489,79 @@ async def audit_reset():
                 f.unlink()
     logger.info("audit demo reset: %s files removed", removed)
     return {"removed": removed}
+
+
+# ---------------------------------------------------------------------------
+# 受控 agent 层（时间线 / 收件箱 / 恢复 / 事件源）
+# ---------------------------------------------------------------------------
+#
+# 这一节只暴露"看"和"补动作"，**没有任何一个端点能替人签字**：
+# 批准仍走 /api/audit/{id}/decide（人 + 理由，推翻要书面说明），
+# 归档走 finance/archive.py（人 + 签名，未批不入档）。
+# agent 端点最多把单子推到待签批、发消息、补发漏掉的消息。
+
+
+def _agent_runtime() -> AgentRuntime:
+    """每次请求现建一个 runtime —— 它本身无状态，状态全在 store 里。
+
+    现建是为了让收件箱目录**延迟解析**：模块级构造会把 data/ 冻结在 import 时刻
+    （store 踩过同一个坑，见 ``AuditStore.base_dir`` 的注释）。
+    """
+    return AgentRuntime(
+        store=AUDIT_STORE,
+        inbox=Inbox(base_dir=resolve_data_path("inbox")),
+    )
+
+
+@app.get("/api/agent/actions")
+async def agent_actions():
+    """L0–L3 动作表 —— 演示"为什么 agent 不能付款"时直接看这张表。"""
+    gate = Gate()
+    return {"actions": [gate.explain(action) for action in Action]}
+
+
+@app.get("/api/agent/{audit_id}/timeline")
+async def agent_timeline(audit_id: str):
+    """把审计轨迹翻成"谁做了什么"：system / agent / human 三类触发者。"""
+    _load_or_404(audit_id)
+    return {"audit_id": audit_id, "timeline": _agent_runtime().timeline(audit_id)}
+
+
+@app.get("/api/agent/inbox")
+async def agent_inbox(who: str = REVIEW_DESK, unread_only: bool = False):
+    """站内收件箱（默认审核台）。不接真邮件/企微 —— 能力先关在系统里。"""
+    runtime = _agent_runtime()
+    return {
+        "who": who,
+        "unread": runtime.inbox.count_unread(who),
+        "messages": runtime.inbox.messages_for(who, unread_only=unread_only),
+    }
+
+
+@app.post("/api/agent/inbox/{message_id}/read")
+async def agent_inbox_read(message_id: str, who: str = REVIEW_DESK):
+    if not _agent_runtime().inbox.mark_read(who, message_id):
+        raise HTTPException(status_code=404, detail="消息不存在或已读。")
+    return {"ok": True}
+
+
+@app.post("/api/agent/recover")
+async def agent_recover():
+    """断点恢复：只补发漏掉的动作，**不重跑判定**。"""
+    return {"recovered": [r.to_dict() for r in _agent_runtime().recover()]}
+
+
+@app.post("/api/agent/scan")
+async def agent_scan():
+    """扫一轮 ``data/inbound/``（事件源）：成对的文档 + 申请单会被自动受理。
+
+    幂等：同一份材料重复投放只受理一次（事件 id = 内容哈希）。
+    """
+    source = DirectorySource(
+        resolve_data_path(AGENT_INBOUND_DIR_NAME), build_request=_build_request
+    )
+    reports = await source.poll_once(_agent_runtime())
+    return {"handled": [r.to_dict() for r in reports], "inbound": str(source.root)}
 
 
 # ---------------------------------------------------------------------------
