@@ -54,6 +54,23 @@
     height: 100%; overflow-y: auto; overscroll-behavior: contain;
     padding-bottom: 18px;          /* 最后一张卡片不贴底 */
   }
+  /* 滚动条：系统默认的深灰滑块在浅色页面上太重，改成半透明细条 */
+  .wrap > div {
+    scrollbar-width: thin;                                  /* Firefox */
+    scrollbar-color: rgba(26, 29, 35, .22) transparent;
+  }
+  .wrap > div::-webkit-scrollbar { width: 10px; }           /* Chrome/Edge */
+  .wrap > div::-webkit-scrollbar-track { background: transparent; }
+  .wrap > div::-webkit-scrollbar-thumb {
+    background: rgba(26, 29, 35, .20);
+    border: 2px solid transparent;      /* 透明边框 + content-box：滑块看起来更细 */
+    border-radius: 999px;
+    background-clip: content-box;
+  }
+  .wrap > div::-webkit-scrollbar-thumb:hover {
+    background: rgba(26, 29, 35, .38);
+    background-clip: content-box;
+  }
   @media (max-width: 1000px) {
     /* 窄屏回到整页滚动：两栏并排时各自滚动没有意义 */
     html, body { height: auto; }
