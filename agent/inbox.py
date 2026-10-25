@@ -41,7 +41,9 @@ KINDS = ("supplement", "supplement_exhausted", "review_required", "draft_ready",
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # 毫秒精度：同一秒内投两条（例如"补料请求 + 催办"）时，秒级时间戳会让
+    # 排序变成插入顺序的偶然结果 —— UI 上"最新一条"就不稳定。
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def _safe_name(name: str) -> str:

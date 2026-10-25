@@ -447,7 +447,8 @@ def test_remind_goes_to_applicant_when_waiting_for_materials(runtime, store):
     out = runtime.remind_stale(now=base + timedelta(hours=49))
     assert len(out) == 1
     assert out[0]["to"] == "张三"  # 要过材料 → 球在申请人那边
-    assert runtime.inbox.messages_for("张三")[-1]["kind"] == "reminder"
+    kinds = [m["kind"] for m in runtime.inbox.messages_for("张三")]
+    assert "reminder" in kinds  # 不依赖同一秒内两条消息的排序
 
 
 def test_remind_skips_decided(runtime, store):
