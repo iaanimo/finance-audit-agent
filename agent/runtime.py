@@ -52,6 +52,10 @@ from .inbox import Inbox
 #: 真实系统这里应该是角色/组，不是自然人；写死一个名字会造成"发给谁"的伪精确。
 REVIEW_DESK = "审核台"
 
+#: 补料最多请求几轮。超过就转人工 —— 自动循环催材料会变成骚扰，
+#: 而且"补了两次还不齐"本身是异常信号，该由人看，不该由系统再问第三遍。
+MAX_SUPPLEMENT_ROUNDS = 2
+
 #: 日志事件名。前缀 ``agent.`` 让"这条轨迹里哪些是代理做的"一眼可查。
 EV_RUN_STARTED = "agent.run.started"
 EV_RUN_FINISHED = "agent.run.finished"
@@ -130,6 +134,7 @@ class AgentRuntime:
         *,
         actor: Actor | None = None,
         narrative_llm: Any = None,
+        parent_audit_id: str = "",
         **run_kwargs: Any,
     ) -> RunReport:
         """受理一张票：跑判定 → 分派动作 → 留痕。
@@ -138,9 +143,17 @@ class AgentRuntime:
         演示与测试都不该依赖外部模型；要接模型时显式传 ``"auto"``，
         接了就必然在日志里留下 model 字段，便于追责。
 
+        :param parent_audit_id: 补料后重新提交时，指向原单。
+            旧单**永不被改写**——重提产生的是新单，两单通过链路关联；
+            分派时会按链路深度决定"再要一次"还是"转人工"。
         :raises finance.audit.AuditError: 判定流程本身故障（不吞，交给上层）
+        :raises ValueError: ``parent_audit_id`` 指向不存在的单
         """
         actor = actor or self.agent
+        parent_audit_id = str(parent_audit_id or "").strip()
+        if parent_audit_id and self.store.load(parent_audit_id) is None:
+            raise ValueError(f"parent_audit_id 不存在：{parent_audit_id}")
+
         src = Path(invoice_path)
         input_sha256 = _sha256_file(src)
 
@@ -162,6 +175,7 @@ class AgentRuntime:
                 "input": src.name,
                 "input_sha256": input_sha256,
                 "narrative_source": result.narrative_source.value,
+                "parent_audit_id": parent_audit_id,
             },
         )
 
@@ -321,6 +335,22 @@ class AgentRuntime:
 
     # ---- 分派 ----
 
+    def _parent_of(self, audit_id: str) -> str:
+        """读该单的"补料前身"（来自 ``agent.run.started.parent_audit_id``）。"""
+        for event in self.store.read_log(audit_id):
+            if event.get("event") == EV_RUN_STARTED:
+                return str(event.get("parent_audit_id") or "")
+        return ""
+
+    def _supplement_rounds(self, audit_id: str) -> int:
+        """这张单是第几轮补料（祖先链长度，最多回溯 5 层防环）。"""
+        depth, current, seen = 0, self._parent_of(audit_id), {audit_id}
+        while current and current not in seen and depth < 5:
+            seen.add(current)
+            depth += 1
+            current = self._parent_of(current)
+        return depth
+
     def _dispatch(self, result: AuditResult, actor: Actor) -> list[Step]:
         """按结论决定程序性动作。三条分支，互相排斥。"""
         blocking = result.blocking_findings
@@ -353,6 +383,28 @@ class AgentRuntime:
 
         if warnings:
             applicant = result.request.applicant.strip() or "申请人"
+            rounds = self._supplement_rounds(result.audit_id)
+            if rounds >= MAX_SUPPLEMENT_ROUNDS:
+                # 补了两轮还不齐：这是异常信号，交给人工看，系统不再循环要材料。
+                return [
+                    self._act(
+                        Action.NOTIFY_REVIEWER,
+                        actor,
+                        result,
+                        to=REVIEW_DESK,
+                        kind="supplement_exhausted",
+                        dedupe_key=f"{result.audit_id}:supplement_exhausted",
+                        subject=f"【补料超限·转人工】{result.request.applicant} "
+                        f"{result.request.expense_type} 单",
+                        body=_supplement_exhausted_body(result, rounds),
+                        extra={
+                            "warnings": [
+                                {"rule_id": f.rule_id, "message": f.message}
+                                for f in warnings
+                            ]
+                        },
+                    )
+                ]
             return [
                 self._act(
                     Action.REQUEST_INFO,
@@ -360,9 +412,9 @@ class AgentRuntime:
                     result,
                     to=applicant,
                     kind="supplement",
-                    dedupe_key=f"{result.audit_id}:supplement",
-                    subject=f"【需补材料】{result.request.expense_type} 报销单",
-                    body=_warning_body(result),
+                    dedupe_key=f"{result.audit_id}:supplement:{rounds + 1}",
+                    subject=f"【需补材料·第 {rounds + 1} 次】{result.request.expense_type} 报销单",
+                    body=_warning_body(result, rounds + 1),
                 )
             ]
 
@@ -518,14 +570,27 @@ def _blocking_body(result: AuditResult) -> str:
     return "\n".join(lines)
 
 
-def _warning_body(result: AuditResult) -> str:
+def _warning_body(result: AuditResult, attempt: int = 1) -> str:
     lines = [
         f"单号：{result.audit_id}　申请人：{result.request.applicant}",
-        "系统预审发现以下疑点，需补充材料后才能继续：",
+        f"系统预审发现以下疑点，需补充材料后才能继续（第 {attempt} 次请求，"
+        f"最多 {MAX_SUPPLEMENT_ROUNDS} 次）：",
     ]
     for f in result.warning_findings:
         lines.append(f"  - [{f.rule_id}] 制度{f.clause} {f.title}：{f.message}")
     lines.append("补齐后重新提交本单，系统会重新审核（本单现有结论不会自动改变）。")
+    return "\n".join(lines)
+
+
+def _supplement_exhausted_body(result: AuditResult, rounds: int) -> str:
+    lines = [
+        f"单号：{result.audit_id}　申请人：{result.request.applicant}",
+        f"已请求补料 {rounds} 次，仍需补充（达到上限 {MAX_SUPPLEMENT_ROUNDS} 次）。",
+        "未消除的疑点：",
+    ]
+    for f in result.warning_findings:
+        lines.append(f"  - [{f.rule_id}] 制度{f.clause} {f.title}：{f.message}")
+    lines.append("系统不再自动催材料 —— 请人工核查是否可放行、退回或要求特批。")
     return "\n".join(lines)
 
 

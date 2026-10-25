@@ -347,6 +347,10 @@ class AuditRunRequest(BaseModel):
         description="关键字段（金额/税号/发票号码）已逐项核对原件的声明",
     )
     confirmed_by: str = Field(default="", description="确认人（留痕）")
+    parent_audit_id: str = Field(
+        default="",
+        description="补料后重新提交时指向原单（旧单不被改写；最多自动补料 2 轮）",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -561,7 +565,11 @@ async def audit_run(req: AuditRunRequest):
             invoice_overrides=req.invoice_overrides,
             field_changes=req.field_changes,
             confirmed_by=req.confirmed_by or request.applicant,
+            parent_audit_id=req.parent_audit_id,
         )
+    except ValueError as exc:  # parent_audit_id 不存在等入参问题
+        logger.warning("audit submit rejected: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 —— 抽取失败给人话提示，不是 500
         logger.warning("audit run failed: %s", exc)
         raise HTTPException(status_code=422, detail=f"发票处理失败：{exc}")

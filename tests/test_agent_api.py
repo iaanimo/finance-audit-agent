@@ -146,6 +146,21 @@ def test_recover_endpoint_reports_nothing_when_clean(client):
     assert client.post("/api/agent/recover").json() == {"recovered": []}
 
 
+def test_upload_with_unknown_parent_is_400(client):
+    """补料重提时 parent_audit_id 指错 → 400（入参问题，不是 422 抽取失败）。"""
+    resp = client.post(
+        "/api/audit/run",
+        json={
+            "filename": "x.pdf",
+            "content_b64": base64.b64encode(b"%PDF-1.4\n%%EOF").decode(),
+            "request": dict(CLAIM),
+            "parent_audit_id": "does-not-exist",
+        },
+    )
+    assert resp.status_code == 400
+    assert "parent_audit_id" in resp.json()["detail"]
+
+
 def test_remind_endpoint_is_callable(client):
     """催办是"调用时判断"，端点必须能调；没有超时单时返回空列表。"""
     resp = client.post("/api/agent/remind")

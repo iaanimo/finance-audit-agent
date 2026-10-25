@@ -70,11 +70,13 @@ def runtime(store, tmp_path) -> AgentRuntime:
     return AgentRuntime(store=store, inbox=Inbox(base_dir=tmp_path / "inbox"))
 
 
-def _submit(runtime, pdf_name: str, **req_over):
+def _submit(runtime, pdf_name: str, *, parent: str = "", **req_over):
     pdf = SAMPLES_PDF / pdf_name
     if not pdf.is_file():
         pytest.skip(f"样本票 {pdf_name} 缺失，请先运行 scripts/make_samples.py")
-    return asyncio.run(runtime.submit(pdf, make_request(**req_over)))
+    return asyncio.run(
+        runtime.submit(pdf, make_request(**req_over), parent_audit_id=parent)
+    )
 
 
 def _events(store, audit_id):
@@ -313,6 +315,83 @@ def test_blocking_notification_carries_warnings(runtime, store):
     assert msg["extra"]["warnings"], "结构化 warnings 必须随消息带出"
     # FAIL 单不额外发补料：反正要驳回，这时追着申请人要材料是骚扰
     assert runtime.inbox.messages_for("张三") == []
+
+
+# --------------------------------------------------------------------------
+# 5b. 补料闭环：链表、限轮、超限转人工
+# --------------------------------------------------------------------------
+
+
+def test_resubmission_links_parent_and_asks_again(runtime, store):
+    """补料后重提：旧单不改写，新单记 parent；仍是疑点 → 第 2 次要材料。"""
+    first = _submit(
+        runtime, "S08_meal_no_headcount.pdf", expense_type="餐饮费",
+        amount="600.00", nights=None, headcount=None, reason="客户工作餐",
+    )
+    second = _submit(
+        runtime, "S08_meal_no_headcount.pdf", parent=first.audit_id,
+        expense_type="餐饮费", amount="600.00", nights=None, headcount=None,
+        reason="客户工作餐",
+    )
+
+    # 链路留痕（新单指向旧单）
+    started = [
+        e for e in store.read_log(second.audit_id)
+        if e.get("event") == "agent.run.started"
+    ]
+    assert started and started[0]["parent_audit_id"] == first.audit_id
+
+    # 两次都发补料请求，但第二次带轮次
+    msgs = [
+        m for m in runtime.inbox.messages_for("张三")
+        if m["audit_id"] in (first.audit_id, second.audit_id)
+        and m["kind"] == "supplement"
+    ]
+    assert len(msgs) == 2
+    assert any("第 2 次" in m["subject"] for m in msgs)
+    # 旧单结论没被改写
+    assert store.load(first.audit_id).findings
+
+
+def test_supplement_exhausted_escalates_to_reviewer(runtime, store):
+    """补到第 2 轮仍不齐 → 不再循环要材料，转人工（supplement_exhausted）。"""
+    a = _submit(runtime, "S08_meal_no_headcount.pdf", expense_type="餐饮费",
+                amount="600.00", nights=None, headcount=None)
+    b = _submit(runtime, "S08_meal_no_headcount.pdf", parent=a.audit_id,
+                expense_type="餐饮费", amount="600.00", nights=None, headcount=None)
+    c = _submit(runtime, "S08_meal_no_headcount.pdf", parent=b.audit_id,
+                expense_type="餐饮费", amount="600.00", nights=None, headcount=None)
+
+    msgs = [
+        m for m in runtime.inbox.messages_for(REVIEW_DESK)
+        if m["audit_id"] == c.audit_id
+    ]
+    assert len(msgs) == 1
+    assert msgs[0]["kind"] == "supplement_exhausted"
+    assert "不再自动催材料" in msgs[0]["body"]
+    # 第三单没有再向申请人要材料
+    assert not [
+        m for m in runtime.inbox.messages_for("张三") if m["audit_id"] == c.audit_id
+    ]
+
+
+def test_resubmission_with_complete_materials_goes_normal(runtime, store):
+    """补上了人数 → 疑点消失，走正常分派（不再要材料）。"""
+    first = _submit(runtime, "S08_meal_no_headcount.pdf", expense_type="餐饮费",
+                    amount="600.00", nights=None, headcount=None)
+    second = _submit(runtime, "S08_meal_no_headcount.pdf", parent=first.audit_id,
+                     expense_type="餐饮费", amount="600.00", nights=None, headcount=4)
+
+    assert not [
+        m for m in runtime.inbox.messages_for("张三") if m["audit_id"] == second.audit_id
+    ]
+    assert [m for m in runtime.inbox.messages_for(REVIEW_DESK)
+            if m["audit_id"] == second.audit_id]
+
+
+def test_resubmission_with_unknown_parent_is_rejected(runtime):
+    with pytest.raises(ValueError):
+        _submit(runtime, "S08_meal_no_headcount.pdf", parent="does-not-exist")
 
 
 # --------------------------------------------------------------------------

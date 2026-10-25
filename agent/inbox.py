@@ -37,7 +37,7 @@ from finance.store import _lock_file, _unlock_file
 INBOX_SUFFIX = ".inbox.jsonl"
 
 #: 消息类型白名单 —— 只在 agent 能发的那几类里挑，防止以后有人塞进"付款通知"。
-KINDS = ("supplement", "review_required", "draft_ready", "reminder")
+KINDS = ("supplement", "supplement_exhausted", "review_required", "draft_ready", "reminder")
 
 
 def _now() -> str:
