@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/iaanimo/finance-audit-agent/actions/workflows/tests.yml/badge.svg)
 
-当前版本 **v1.0.0**（变更见 [CHANGELOG](CHANGELOG.md)）
+当前版本 **v1.1.0**（变更见 [CHANGELOG](CHANGELOG.md)）
 
 财务报销审核 Agent —— LLM 负责抽取与叙述，**审核判定由 19 条纯 Python 规则完成**：结论可复现、可追溯、可审计。
 
