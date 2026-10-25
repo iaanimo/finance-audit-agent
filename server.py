@@ -76,7 +76,7 @@ def setup_logging() -> None:
 #: 应用版本（发布用）。规则版本在 ``finance/erp_api.py::RULE_VERSION``——
 #: 两者不同步：应用可以改界面、加端点而不动规则；规则一改就必须升 RULE_VERSION，
 #: 否则历史结论没法按当时版本复算。
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 API_DESCRIPTION = """
 财务报销审核受控 Agent —— 接口文档。
@@ -306,7 +306,7 @@ _SCAN_RESPONSES = {
                             "recovered": False,
                         }
                     ],
-                    "inbound": "D:\\nono\\data\\inbound",
+                    "inbound": "data/inbound",
                 }
             }
         },
