@@ -895,6 +895,22 @@ function renderResult(r) {
       '</div></div>';
   }
 
+  /* 处置选项：把"驳回"翻成几条可执行路径。系统只列选项，不替人选。 */
+  var disp = r.dispositions || [];
+  if (disp.length) {
+    html += '<div class="card" style="margin-top:14px"><h2>处置选项（由你决定）</h2>' +
+      '<div class="body">' + disp.map(function (o, i) {
+        return '<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid #eef1f4;align-items:flex-start">' +
+          '<div style="flex:0 0 118px;font-weight:600;font-size:13px">' + esc(o.title) + '</div>' +
+          '<div style="flex:1;font-size:13px;line-height:1.6">' + esc(o.detail) +
+            '<div style="font-size:11px;color:#8a939d;margin-top:3px">需要：' + esc(o.requires || '—') + '</div></div>' +
+          '<button class="ghost" data-copy="' + i + '" style="flex:none">复制</button></div>';
+      }).join('') +
+      '<div style="margin-top:8px;font-size:12px;color:#8a939d">' +
+      '系统只列出路径，不替你选；批不批、怎么批仍然由人决定，并留下签名与理由。</div>' +
+      '</div></div>';
+  }
+
   /* 发票要素 */
   var inv = r.invoice;
   html += '<div class="card" style="margin-top:14px"><h2>② 发票要素（由文本层抽取）</h2>' +
@@ -983,6 +999,24 @@ function renderResult(r) {
     '<div class="body" id="logBox"><div class="hint">加载中…</div></div></div>';
 
   el('resultCol').innerHTML = html;
+
+  /* 处置选项的「复制」：把模板文字交给人，不写入任何状态 */
+  Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (btn) {
+    btn.addEventListener('click', function () {
+      var idx = Number(btn.getAttribute('data-copy'));
+      var opt = disp[idx];
+      if (!opt) return;
+      var text = opt.title + '\\n' + opt.detail;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          function () { toast('已复制：' + opt.title); },
+          function () { toast('复制失败，请手动选择文本'); }
+        );
+      } else {
+        toast('当前浏览器不支持一键复制，请手动选择文本');
+      }
+    });
+  });
 
   if (!decided) {
     el('approveBtn').addEventListener('click', function () { askDecide('APPROVED'); });

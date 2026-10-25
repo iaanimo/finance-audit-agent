@@ -44,7 +44,7 @@ from agent.runtime import REVIEW_DESK, AgentRuntime
 from config.settings import get_settings
 from finance import AuditResult, Decision, ReimbursementRequest, parse_money
 from finance.audit import AuditError, OverrideReasonRequired, decide
-from finance.advice import suggest_advice
+from finance.advice import suggest_advice, suggest_dispositions
 from finance.erp_api import router as _erp_router
 from finance.policy import load_policy_bundle
 from finance.store import AuditStore
@@ -584,7 +584,7 @@ async def audit_run(req: AuditRunRequest):
         result.suggested_status.value,
         result.narrative_source.value,
     )
-    return result.to_json_dict()
+    return _result_payload(result)
 
 
 class ExtractRequest(BaseModel):
@@ -690,10 +690,7 @@ async def audit_detail(audit_id: str):
     「这张单要改成什么样才能过」，把"驳回"变成可执行的动作。
     """
     result = _load_or_404(audit_id)
-    return {
-        **result.to_json_dict(),
-        "advice": suggest_advice(result.findings, policy=load_policy_bundle()),
-    }
+    return _result_payload(result)
 
 
 @app.get("/api/audit/{audit_id}/log", tags=["核心审核"], summary="审计轨迹（哈希链）")
@@ -747,7 +744,27 @@ async def audit_decide(audit_id: str, req: AuditDecideRequest):
     # 决定已落盘 → 该单的待办消息一并关闭（由人的决定关闭，不是 agent）
     _agent_runtime().settle(audit_id, by=req.operator.strip())
 
-    return result.to_json_dict()
+    return _result_payload(result)
+
+
+def _result_payload(result: AuditResult) -> dict:
+    """审核单响应 = 落盘字段 + 两个**派生**字段（advice / dispositions）。
+
+    派生字段现算、不落库、不参与判定、不影响状态机：
+    - advice：这张单要改成什么样才能过；
+    - dispositions：把"驳回"变成几条可执行的路径（由人选，系统不代替）。
+    """
+    policy = load_policy_bundle()
+    invoice = result.invoice
+    data = result.to_json_dict()
+    data["advice"] = suggest_advice(result.findings, policy=policy)
+    data["dispositions"] = suggest_dispositions(
+        result.findings,
+        applicant=result.request.applicant,
+        expense_type=result.request.expense_type,
+        issue_date=invoice.issue_date.isoformat() if invoice.issue_date else "",
+    )
+    return data
 
 
 @app.post("/api/audit/reset", tags=["系统"], summary="清空运行数据（仅演示模式）")

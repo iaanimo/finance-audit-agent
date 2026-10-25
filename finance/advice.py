@@ -239,3 +239,88 @@ def suggest_advice(findings: list[AuditFinding], policy=None) -> list[dict]:
         else:
             items.append(_default(f))
     return items
+
+
+#: 会触发"补情况说明"的规则：金额/时限类超标 —— 说明能救、也能走特批。
+EXPLAINABLE_RULES = {"R003", "R005", "R006", "R007"}
+
+#: 处置选项的 code（稳定标识，前端与 ERP 可据此做路由；文案可以改，code 不要改）。
+DISP_REVISE = "revise"
+DISP_SUPPLEMENT = "supplement"
+DISP_EXPLAIN = "explain"
+DISP_ESCALATE = "escalate"
+
+
+def suggest_dispositions(
+    findings: list[AuditFinding],
+    *,
+    applicant: str = "",
+    expense_type: str = "",
+    issue_date: str = "",
+) -> list[dict]:
+    """处置选项：把"驳回"变成几条可执行的路径。**只读、确定性、不改变任何状态。**
+
+    系统只**列出**选项，不替人选、不自动执行；选哪条、批不批仍然由人决定。
+    每个选项带一句能直接用的文字（模板），空着的地方留给人填 —— 不编造事实，
+    也不给"拆单/改费用类型绕过去"这类规避建议。
+
+    - revise     ：退回修改后重新提交（原单不动，生成新单）；
+    - supplement ：补齐材料（制度要求"补充材料"的规则）；
+    - explain    ：补一份情况说明走特批（限额/时限类超标）；
+    - escalate   ：转上级书面特批（存在事实性驳回项时）。
+    """
+    blocking = [f for f in findings if f.severity is Severity.FAIL]
+    nonpass = [f for f in findings if f.severity is not Severity.PASS]
+    if not nonpass:
+        return []
+
+    advice = suggest_advice(findings)
+    kinds = {item["kind"] for item in advice}
+    rules = {f.rule_id for f in nonpass}
+
+    out: list[dict] = [
+        {
+            "code": DISP_REVISE,
+            "title": "退回修改",
+            "detail": "按补正建议修改申请单后重新提交；原单保留、不改写，生成新单。",
+            "requires": "申请人",
+        }
+    ]
+    if kinds & {KIND_SUPPLEMENT, KIND_FIX, KIND_REISSUE}:
+        out.append(
+            {
+                "code": DISP_SUPPLEMENT,
+                "title": "补齐材料",
+                "detail": "；".join(
+                    item["text"]
+                    for item in advice
+                    if item["kind"] in {KIND_SUPPLEMENT, KIND_FIX, KIND_REISSUE}
+                ),
+                "requires": "申请人",
+            }
+        )
+    if rules & EXPLAINABLE_RULES:
+        who = applicant or "本人"
+        when = issue_date or "____"
+        what = expense_type or "____"
+        out.append(
+            {
+                "code": DISP_EXPLAIN,
+                "title": "补情况说明（走特批）",
+                "detail": (
+                    f"情况说明模板：{who}于 {when} 因 ________ 发生{what}，"
+                    "超出公司标准部分申请特批（真实原因由本人填写，系统不代写）。"
+                ),
+                "requires": "申请人 + 审批人",
+            }
+        )
+    if blocking:
+        out.append(
+            {
+                "code": DISP_ESCALATE,
+                "title": "转上级特批",
+                "detail": "由部门负责人与财务负责人书面确认后按特批流程处理；系统只登记选项，不代替审批。",
+                "requires": "部门负责人 + 财务负责人",
+            }
+        )
+    return out
