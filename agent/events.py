@@ -185,6 +185,21 @@ class DirectorySource:
 
     # ---- 扫描 ----
 
+    def pending(self) -> list[dict[str, str]]:
+        """收件口当前待受理的一对文件（**只读**，不移动、不标记）。
+
+        给界面看"收件口有什么"，不触发受理 —— 受理仍然只能由 poll_once 做。
+        """
+        out: list[dict[str, str]] = []
+        for document, claim in self._pairs():
+            out.append(
+                {
+                    "document": document.name,
+                    "claim": claim.name if claim is not None else "",
+                }
+            )
+        return out
+
     def _pairs(self):
         """产出 ``(document, claim|None)``。排序保证处理顺序可复现。"""
         if not self.root.is_dir():

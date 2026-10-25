@@ -127,6 +127,21 @@ def test_inbox_mark_read(client, temp_data_dir):
     assert client.post(f"/api/agent/inbox/{message_id}/read").status_code == 404
 
 
+def test_inbound_endpoint_lists_pending_without_moving(client, temp_data_dir):
+    """收件口状态是**只读**：列得出文件，但不能顺手把文件移走/受理。"""
+    inbound = temp_data_dir / "inbound"
+    inbound.mkdir(parents=True, exist_ok=True)
+    _drop(inbound)
+
+    d = client.get("/api/agent/inbound").json()
+    assert d["pending_count"] == 1
+    assert d["pending"][0]["document"] == "S01_hotel_ok.pdf"
+    assert d["pending"][0]["claim"] == "S01_hotel_ok.claim.json"
+    # 只读：文件还在收件口，账本也没动
+    assert (inbound / "S01_hotel_ok.pdf").is_file()
+    assert d["processed"] == 0
+
+
 def test_recover_endpoint_reports_nothing_when_clean(client):
     assert client.post("/api/agent/recover").json() == {"recovered": []}
 

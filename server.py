@@ -879,6 +879,33 @@ async def agent_remind():
     return {"reminded": _agent_runtime().remind_stale()}
 
 
+@app.get("/api/agent/inbound", tags=["Agent 编排"], summary="收件口状态")
+async def agent_inbound():
+    """收件口（``data/inbound``）当前有什么：待受理几对、已受理多少、失败多少。
+
+    **只读**：不移动文件、不触发受理。受理只能由 ``POST /api/agent/scan`` 做。
+    """
+    root = resolve_data_path(AGENT_INBOUND_DIR_NAME)
+    source = DirectorySource(root, build_request=_build_request)
+
+    def _count(name: str) -> int:
+        directory = root / name
+        return (
+            sum(1 for p in directory.iterdir() if p.is_dir())
+            if directory.is_dir()
+            else 0
+        )
+
+    pending = source.pending()
+    return {
+        "pending": pending,
+        "pending_count": len(pending),
+        "done": _count("done"),
+        "failed": _count("failed"),
+        "processed": len(source.ledger()),
+    }
+
+
 @app.post(
     "/api/agent/scan",
     tags=["Agent 编排"],

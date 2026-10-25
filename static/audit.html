@@ -280,6 +280,8 @@
   <h1>财务报销审核台</h1>
   <span class="tag">受控 AGENT</span>
   <div class="links">
+    <button class="linkbtn" id="scanBtn"
+            title="收件口 data/inbound：扫一轮，成对的「文档 + 申请单」会被自动受理">收件口 <span id="inboundCount">0</span> · 扫一轮</button>
     <button class="linkbtn" id="inboxBtn" style="display:none"
             title="审核台待办：agent 分派过来的单子（处理完会自动清零）">收件箱 <span class="badge" id="inboxCount">0</span></button>
     <button class="linkbtn" id="resetBtn" style="display:none"
@@ -871,6 +873,11 @@ function renderResult(r) {
 
   var html = '<div class="card"><div class="body">' + banner + '</div></div>';
 
+  /* Agent 轨迹（谁做了什么）：放在结论正下方第一屏 —— 原来埋在第 ⑧ 张卡里，
+     人看不到"这一步是谁触发的"，整页就退化成"一个填表查规则的页面" */
+  html += '<div class="card" style="margin-top:14px"><h2>Agent 轨迹 · 谁做了什么</h2>' +
+    '<div class="body" id="whoBox"><div class="hint">加载中…</div></div></div>';
+
   /* 补正建议：把"哪里不合规"翻成"怎么改"。只读派生，不进判定 */
   var advice = r.advice || [];
   if (advice.length) {
@@ -974,10 +981,6 @@ function renderResult(r) {
   /* 轨迹 */
   html += '<div class="card" style="margin-top:14px"><h2>⑦ 审计轨迹（只追加，不可修改）</h2>' +
     '<div class="body" id="logBox"><div class="hint">加载中…</div></div></div>';
-
-  /* 谁做了什么（人话版轨迹） */
-  html += '<div class="card" style="margin-top:14px"><h2>⑧ 谁做了什么</h2>' +
-    '<div class="body" id="whoBox"><div class="hint">加载中…</div></div></div>';
 
   el('resultCol').innerHTML = html;
 
@@ -1193,6 +1196,40 @@ document.addEventListener('click', function (e) {
   if (!panel.contains(e.target) && !el('inboxBtn').contains(e.target)) toggleInbox(false);
 });
 
+/* ---------------- 收件口（事件源） ----------------
+ * 把"agent 自己受理"这件事摆到台面上：收件口有几对文件、扫一轮受理了什么。
+ * 受理动作仍然只有 POST /api/agent/scan 能触发 —— 界面只是把它变得可见、可点。
+ */
+function loadInbound() {
+  return fetch('/api/agent/inbound').then(function (r) { return r.json(); }).then(function (d) {
+    var n = d.pending_count || 0;
+    var cnt = el('inboundCount'); if (cnt) cnt.textContent = n;
+    var btn = el('scanBtn');
+    if (btn) {
+      btn.title = n
+        ? ('收件口有 ' + n + ' 对文件待受理（文档 + 申请单）')
+        : '收件口为空：把一对「文档 + 申请单」放进 data/inbound/ 即可';
+    }
+    return d;
+  }).catch(function () { /* 收件口状态不可用不影响审核台 */ });
+}
+
+function scanOnce() {
+  var btn = el('scanBtn');
+  if (btn) btn.disabled = true;
+  return fetch('/api/agent/scan', { method: 'POST' })
+    .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error(d.detail || '扫描失败'); return d; }); })
+    .then(function (d) {
+      var n = (d.handled || []).length;
+      toast(n ? ('收件口自动受理了 ' + n + ' 张单据') : '收件口没有新单据');
+      loadInbound(); loadInbox(); loadAuditList();
+    })
+    .catch(function (e) { toast('✕ ' + e.message); })
+    .finally(function () { if (btn) btn.disabled = false; });
+}
+
+el('scanBtn').addEventListener('click', function (e) { e.stopPropagation(); scanOnce(); });
+
 /* ---------------- 审核单列表 ---------------- */
 function loadAuditList() {
   loadInbox();   // 列表刷新时顺带刷待办角标（同一个数据源变化点）
@@ -1254,6 +1291,11 @@ el('resetBtn').addEventListener('click', function () {
 window.addEventListener('load', function () {
   loadSamples();
   loadAuditList();
+  // 收件口：有票就自己受理（把"发起权"交给 agent）；没有就只更新角标。
+  // 受理仍然只起草/建单，批准与归档的动作人和签字权不变。
+  loadInbound().then(function (d) {
+    if (d && d.pending_count > 0) scanOnce();
+  });
   // 清空按钮只在**演示模式**下才显示 —— 服务端默认关闭该接口（法定保管义务），
   // 页面跟着走，免得留一个点了必然失败的按钮。
   fetch('/api/health').then(function (r) { return r.json(); }).then(function (d) {
